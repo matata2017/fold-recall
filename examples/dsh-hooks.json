@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "hooks": {
+    "agent/pre-step": [
+      {
+        "command": "node \"/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+        "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+        "timeout": 12,
+        "statusMessage": "fold-recall: 回忆与遗忘",
+        "additionalContextLimit": 2500
+      }
+    ]
+  }
+}

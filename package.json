@@ -1,0 +1,12 @@
+{
+  "name": "fold-recall",
+  "version": "0.1.0",
+  "description": "Human-like long-term memory for long-running agents, on top of billion-context: decay, reinforcement, importance pinning, forgetting and recall judged by a small decision model.",
+  "type": "module",
+  "bin": { "fold-recall": "bin/fold-recall.mjs" },
+  "scripts": { "test": "node test/selftest.mjs" },
+  "engines": { "node": ">=22.5" },
+  "files": ["bin", "lib", "examples", "README.md", "LICENSE"],
+  "license": "MIT",
+  "keywords": ["agent", "memory", "context-compression", "billion-context", "dsh", "claude-code", "startlux"]
+}
