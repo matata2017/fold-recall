@@ -22,6 +22,7 @@ import * as D from '../lib/decide.mjs'
 import * as M from '../lib/memory.mjs'
 import * as E from '../lib/engine.mjs'
 import * as R from '../lib/repair.mjs'
+import * as RP from '../lib/replay.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
 const LOCK = join(S.HOME, 'consolidate.lock')
@@ -153,6 +154,36 @@ async function cmdEval() {
   console.log(`失败 ${rows.filter((r) => r.error).length}，决策延迟中位 ${rows.map((r) => r.ms).sort((a, b) => a - b)[Math.floor(rows.length / 2)]}ms`)
 }
 
+/** 遗忘的事后检验：fold-recall replay <会话>（两种策略对比；不调接口、不写任何东西） */
+function cmdReplay() {
+  const db = S.openStore(), bdb = B.openBili()
+  const sid = resolveSession(bdb, pos[1])
+  const mem = B.loadMemory(bdb, [sid])
+  const meta = S.metaMap(db)
+  const messages = RP.loadMessages(bdb, sid)
+  console.log(`会话 ${sid}：消息 ${messages.length} 条（其中用户 ${messages.filter((m) => m.user).length} 条），记忆块 ${mem.blocks.filter((b) => b.session_id === sid).length} 个\n`)
+  let printedBase = false
+  for (const [name, p] of Object.entries(RP.POLICIES)) {
+    const r = RP.replay(mem, meta, messages, sid, p.fn)
+    if (!printedBase) {
+      printedBase = true
+      const bl = r.baseline, hit = (t) => { const l = bl.filter((x) => !t || x.block.type === t); return `${l.filter((x) => x.reusedAt != null).length}/${l.length}` }
+      console.log(`基线（检测器灵敏度）：所有块折叠之后又被提到 ${hit()}；按类型 episode ${hit('episode')} · knowledge ${hit('knowledge')} · noise ${hit('noise')} · preference ${hit('preference')}
+`)
+    }
+    const f = r.forgotten, reused = f.filter((x) => x.reusedAt != null)
+    const byType = (list) => ['episode', 'noise', 'knowledge'].map((t) => `${t} ${list.filter((x) => x.block.type === t).length}`).join(' / ')
+    const chars = f.reduce((s, x) => s + x.block.summary.length, 0)
+    console.log(`== ${p.label}（${name}）`)
+    console.log(`  遗忘 ${f.length} 块（${byType(f)}），共 ${r.passes} 次，移出摘要约 ${Math.round(chars / 1000)}K 字`)
+    console.log(`  之后又被用到 ${reused.length} 块（${byType(reused)}）；其中 500 条消息内就用到 ${reused.filter((x) => x.reusedAt - x.at <= 500).length} 块`)
+    for (const x of reused.slice(0, 15)) {
+      console.log(`    ${x.block.block_id.padEnd(4)} ${String(x.block.type).padEnd(9)} 遗忘于 m${x.at} → m${x.reusedAt}（隔 ${x.reusedAt - x.at} 条，${x.reusedBy === 'user' ? '你提到' : '模型提到'}）「${x.block.topic.slice(0, 36)}」`)
+    }
+    console.log('')
+  }
+}
+
 async function cmdRecall() {
   const db = S.openStore(), bdb = B.openBili()
   const sid = resolveSession(bdb, pos[1])
@@ -226,7 +257,7 @@ async function cmdDoctor() {
   }
 }
 
-const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
+const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主

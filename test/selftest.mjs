@@ -121,6 +121,15 @@ try {
     assert.deepEqual(ids, ['b1', 'b2', 'b3', 'b4'])
     assert.ok(!ids.includes('b5'))
   })
+  await t('保守遗忘：知识、偏好/约定类的块再淡也不忘', () => {
+    const key = `${SID}#b2`
+    const old = db.prepare('select type from meta where key=?').get(key).type
+    db.prepare('update meta set type=? where key=?').run('knowledge', key)
+    try {
+      const ids = M.forgetRuns(E.loadAll(db, bdb, peers), SID).flat().map((b) => b.block_id)
+      assert.deepEqual(ids, ['b1', 'b3', 'b4'])                       // b2 成了知识类：留下
+    } finally { db.prepare('update meta set type=? where key=?').run(old, key) }
+  })
   await t('这一轮刚提起/找回的块不会被同时遗忘', async () => {
     // 提到 deploy：b2、b3 被提起/找回，剩下的旧块只有 b1、b4，不够 3 块，不遗忘
     const { decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 8, prompt: 'deploy.sh 部署脚本最后修好没', peers, dryRun: true })

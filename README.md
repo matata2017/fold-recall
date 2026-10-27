@@ -126,7 +126,7 @@ w = Σ  c_i · (age_i + 1) ^ -0.5
 满足以下全部条件的块会被遗忘：
 
 - 属于**当前会话**，且仍在上下文中；
-- 已整理、未钉住；
+- 类型是**过程**（episode）或**噪声**（noise）、未钉住。**知识、偏好/约定一律不忘**：忘错了模型察觉不到，它们留给 billion-context 自己的分层蒸馏去压；
 - 这一轮没有被提起、没有被找回；
 - **保持度 < 遗忘线**。遗忘线 = `1500^-0.5`，约等于"之后 1500 条消息都没用到"。
 
@@ -286,6 +286,9 @@ node bin/fold-recall.mjs consolidate <会话> [--limit N]
 # 回忆评测：一组带标准答案的问题，逐题试运行（不写记录），统计命中率与误触发
 # 题目格式：[{"session":"会话前缀","prompt":"消息","expect":["b91"]}]，expect 为空表示不该触发回忆
 node bin/fold-recall.mjs eval <题目.json>
+
+# 遗忘的事后检验：把真实长会话从头重放，对比两种遗忘策略，看被遗忘的块后来有没有又被用到（不调接口、不写记录）
+node bin/fold-recall.mjs replay <会话>
 
 # 给压缩时机打标注，用来检验阈值：这一轮之后有没有用到更早的细节
 node bin/fold-recall.mjs label <会话> <轮> <none|tail|older|unknown> [备注]
