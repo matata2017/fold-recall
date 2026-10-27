@@ -197,6 +197,27 @@ try {
     assert.ok(plan.skipped.some((s) => s.ids === 'b4'))
     assert.match(R.repairContent(plan.entries), /^m00401–m00600 部署脚本 deploy\.sh 最终结果\n要点/)
   })
+  await t('作废：被推翻的块不再找回、不进候选、不当最新进展；撤销后恢复', async () => {
+    const memBefore = E.loadAll(db, bdb, peers)
+    const b3 = memBefore.blocks.find((b) => b.session_id === SID && b.block_id === 'b3')
+    const ask = () => E.onPrompt(db, bdb, { sessionId: SID, turn: 77, prompt: 'deploy.sh 部署脚本最后怎么样了', peers, dryRun: true, timeoutMs: 5000 })
+    const before = await ask()
+    assert.ok((before.decision.recalled ?? []).includes(b3.key))            // 作废前：会找回 b3
+    S.supersede(db, M.contentKey(b3), b3.key, '测试：结论已被推翻')
+    const after = await ask()
+    assert.ok(!(after.decision.recalled ?? []).includes(b3.key))
+    const mem = E.loadAll(db, bdb, peers)
+    M.score(mem, 'deploy.sh 部署脚本最后怎么样了')
+    assert.ok(!M.candidates(mem, 24, { current: SID }).some((b) => b.key === b3.key))
+    assert.ok(!M.mentioned(mem).some((b) => b.key === b3.key))
+    const b2 = mem.blocks.find((b) => b.session_id === SID && b.block_id === 'b2')
+    assert.notEqual(M.latestInThread(mem, S.linksFrom(db), b2).key, b3.key)
+    assert.equal(mem.blocks.find((b) => b.key === b3.key).keep, 0)
+    assert.equal(S.supersededList(db).length, 1)
+    assert.ok(S.unsupersede(db, M.contentKey(b3)))
+    const back = await ask()
+    assert.ok((back.decision.recalled ?? []).includes(b3.key))              // 撤销后：又能找回
+  })
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')
     assert.equal(D.redact('key sk-abcdefghijklmnopqrstuvwxyz ok'), 'key <已脱敏> ok')

@@ -56,6 +56,7 @@ fold-recall 想让智能体的记忆**像人一样**：
 | **回忆** | 新消息涉及某段旧事时，找回那一段，以及这件事**最新进展**的那一段，用一两行告诉模型 | 每条用户消息 |
 | **压缩时机** | 判断是否换话题、上一件是否做完；默认**只记录不注入**（billion-context 自己会提醒压缩），可改为注入提示 | 每条用户消息，有冷却 |
 | **试运行与报告** | 命令行查看记忆概况，或试一条消息"会找回什么" | 手动 |
+| **作废** | 内容被推翻的块（旧设定、已更正的结论）不再被找回、不再加强、追最新进展时跳过，可被移出上下文；原文保留 | 手动（`supersede`），或由智能体在发现过时回忆时调用 |
 | **继承修复** | 会话换了 id、折叠状态没接全时，把老会话已有的摘要套回来 | 手动（`repair`） |
 
 **尽量不打扰对话**：对话里只会出现一两行 `[回忆]`；遗忘在后台做完，压缩时机只记在日志里，用 `report` 查看。任何一步失败或超时，**什么也不注入、什么也不改**。
@@ -179,6 +180,7 @@ m00001–m00806 旧工作索引（fold-recall 遗忘，5 段）
 - **每条用户消息最多一次决策请求**：回忆题和时机题合在一起问，实测 1–3 秒，偶尔 5 秒以上。超过 6 秒就放弃，不注入。
 - 整理在**分离的后台进程**里做，每次最多 40 块、并发 4，有锁防重复，不挡对话。
 - DSH 的 `agent/pre-step` 每一步都会触发，同一轮只处理一次。
+- 子会话（subagent / teammate）默认跳过：子智能体常被要求独立判断，注入同项目旧记忆会造成锚定。
 - 钩子里任何异常都吞掉，不打断宿主。
 
 ---
@@ -295,6 +297,12 @@ node bin/fold-recall.mjs replay <会话>
 # 给压缩时机打标注，用来检验阈值：这一轮之后有没有用到更早的细节
 node bin/fold-recall.mjs label <会话> <轮> <none|tail|older|unknown> [备注]
 
+# 作废：内容已被推翻的记忆块不再被找回、不再被提起加强、追"最新进展"时跳过，并可被移出上下文
+# 按内容作废（复制/恢复出的同内容副本一起作废）；原文不删，decompress 仍可查看
+node bin/fold-recall.mjs supersede <会话> <块> [原因]
+node bin/fold-recall.mjs unsupersede <会话> <块>      # 撤销
+node bin/fold-recall.mjs superseded                     # 列出已作废的块
+
 # 修复会话继承（见下文「会话换了 id 后卡住、超窗」）：默认只看计划，加 --apply 执行
 node bin/fold-recall.mjs repair <会话> [--apply]
 
@@ -368,6 +376,7 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 | `FOLD_RECALL_HOME` | `~/.fold-recall` | 状态库与 `.env` 的位置 |
 | `BILI_INDEX_DB` | `~/.local/share/billion-context/sessions/index.db` | billion-context 的库 |
 | `FOLD_RECALL_DEBUG` | — | 设为 1 时，钩子把异常打到 stderr |
+| `FOLD_RECALL_SUBAGENTS` | `off` | 委派出去的子会话（DSH 会话头 `origin: subagent` 或 `delegationDepth > 0`）默认**不回忆、不记录**，避免把主会话的旧结论塞给需要独立判断的子智能体；设为 `on` 恢复处理 |
 
 阈值（强度、钉住线、遗忘线、冷却）在 `lib/memory.mjs` 和 `lib/engine.mjs` 顶部，都有注释。
 

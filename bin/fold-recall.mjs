@@ -8,6 +8,7 @@
  *   fold-recall report <session>             记忆概况：强度分布、钉住的、将被遗忘的、最近的判断
  *   fold-recall repair <session> [--apply]    修复会话继承：把父会话已有的摘要套回子会话（默认只看计划）
  *   fold-recall label <session> <turn> <none|tail|older|unknown> [备注]
+ *   fold-recall supersede <session> <bN> [原因] / unsupersede <session> <bN> / superseded   作废被推翻的记忆块
  *   fold-recall doctor                       检查环境
  */
 import '../lib/quiet.mjs'
@@ -36,6 +37,36 @@ function dshPeers(sessionId) {
   }
   return []
 }
+// 委派出去的子会话（DSH subagent / teammate）默认不注入回忆：
+// 子智能体常被要求独立判断（例如先不看主会话的结论），把同项目的旧记忆塞给它会造成锚定。
+// 判据：DSH 会话文件头 origin === 'subagent' 或 delegationDepth > 0；钩子数据里的 agent_type 若像子代理也算。
+// FOLD_RECALL_SUBAGENTS=on 可恢复对子会话的处理。
+function dshSessionHeader(sessionId) {
+  const root = join(homedir(), '.dsh', 'sessions')
+  if (!existsSync(root)) return null
+  const bare = sessionId.replace(/^session-/, '')
+  const names = [...new Set([sessionId, bare, 'session-' + bare])]            // 子会话目录名可能不带 session- 前缀
+  for (const dir of readdirSync(root)) {
+    const f = names.map((n) => join(root, dir, n, 'session.v4.jsonl.zstd')).find((x) => existsSync(x))
+    if (!f) continue
+    try {
+      const zlib = process.getBuiltinModule('node:zlib')
+      if (typeof zlib.zstdDecompressSync !== 'function') return null
+      const buf = readFileSync(f)
+      const next = buf.indexOf(Buffer.from([0x28, 0xb5, 0x2f, 0xfd]), 4)       // 只解第一帧，文件头在最前面
+      const text = zlib.zstdDecompressSync(next > 0 ? buf.subarray(0, next) : buf).toString('utf8')
+      return JSON.parse(text.split('\n', 1)[0])
+    } catch { return null }
+  }
+  return null
+}
+function isDelegated(p, sessionId) {
+  if (process.env.FOLD_RECALL_SUBAGENTS === 'on') return false
+  if (/sub|delegat|teammate|child/i.test(String(p.agent_type ?? ''))) return true
+  const h = dshSessionHeader(sessionId)
+  return !!h && (h.origin === 'subagent' || Number(h.delegationDepth) > 0)
+}
+
 function peersOf(db, sessionId) {
   return [...new Set([sessionId, ...S.projectPeers(db, sessionId), ...dshPeers(sessionId)])]
 }
@@ -69,6 +100,10 @@ async function hook() {
   const sessionId = String(p.session_id ?? '')
   if (!prompt || !sessionId) return                                           // DSH：只有每轮第一步带用户消息
   if (/^\[dsh-mnemon:/.test(prompt)) return                                   // 记忆插件的内部委派
+  if (isDelegated(p, sessionId)) {                                            // 子会话：不回忆、不记录（防锚定）
+    if (process.env.FOLD_RECALL_DEBUG) process.stderr.write(`fold-recall: 跳过子会话 ${sessionId}\n`)
+    return
+  }
   let host, turn
   if (ev === 'agent/pre-step') { host = 'dsh'; turn = Number(String(p.turn_id ?? '').split('#').pop()) }
   else if (ev === 'UserPromptSubmit') { host = 'claude-code'; turn = `t${Date.now()}` }
@@ -245,6 +280,40 @@ function cmdLabel() {
   console.log('已记录')
 }
 
+/**
+ * 作废：fold-recall supersede <会话> <块> [原因]   撤销：fold-recall unsupersede <会话> <块>   列出：fold-recall superseded
+ * 内容已被推翻的记忆块（例如旧的设定、已更正的结论）：不再被找回、不再被提起加强、追"最新进展"时跳过、可以被移出上下文。
+ * 按内容作废：复制/恢复出的同内容副本一起作废。原文不删，decompress 仍可查看。
+ */
+function findBlock(db, bdb) {
+  const sid = resolveSession(bdb, pos[1])
+  const id = String(pos[2] ?? '')
+  if (!/^b\d+$/.test(id)) { console.error('块写成 bN，例如 b3'); process.exit(1) }
+  const mem = E.loadAll(db, bdb, peersOf(db, sid))
+  const b = mem.blocks.find((x) => x.session_id === sid && x.block_id === id)
+  if (!b) { console.error(`${sid} 里没有块 ${id}`); process.exit(1) }
+  return b
+}
+function cmdSupersede() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
+  const b = findBlock(db, bdb)
+  const reason = pos.slice(3).join(' ')
+  S.supersede(db, M.contentKey(b), b.key, reason)
+  console.log(`已作废 ${b.key.split('#')[0].slice(0, 16)}… ${b.block_id}「${b.topic.slice(0, 40)}」${reason ? '：' + reason : ''}`)
+}
+function cmdUnsupersede() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
+  const b = findBlock(db, bdb)
+  console.log(S.unsupersede(db, M.contentKey(b)) ? `已撤销作废 ${b.block_id}「${b.topic.slice(0, 40)}」` : `${b.block_id} 本来就没有作废`)
+}
+function cmdSuperseded() {
+  const rows = S.supersededList(S.openStore())
+  if (!rows.length) return console.log('没有作废的记忆块')
+  for (const r of rows) console.log(`${new Date(r.ts).toISOString().slice(0, 10)}  ${r.key}  ${r.reason}`)
+}
+
 async function cmdDoctor() {
   const [maj, min] = process.versions.node.split('.').map(Number)
   console.log(`node ${process.versions.node} ${maj > 22 || (maj === 22 && min >= 5) ? 'OK' : '需要 ≥ 22.5（node:sqlite）'}`)
@@ -257,12 +326,13 @@ async function cmdDoctor() {
   }
 }
 
-const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
+const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor,
+  supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主
 Promise.resolve(run()).catch((e) => { if (args[0] !== 'hook' || process.env.FOLD_RECALL_DEBUG) { console.error(e); process.exitCode = 1 } })
 
 function readFileHead() {
-  return `fold-recall <hook|consolidate|recall|report|repair|label|doctor>  （详见 README）`
+  return `fold-recall <hook|consolidate|recall|report|repair|label|supersede|unsupersede|superseded|doctor>  （详见 README）`
 }
