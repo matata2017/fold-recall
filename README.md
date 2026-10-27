@@ -223,11 +223,14 @@ node test/selftest.mjs              # 自测：假数据 + 本地假接口，不
   "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
   "timeout": 12,
   "statusMessage": "fold-recall: 回忆与遗忘",
-  "additionalContextLimit": 2500
+  "additionalContextLimit": 2500,
+  "firstStepOnly": true
 }
 ```
 
-然后在 DSH 的钩子审查弹窗或「设置 → 钩子」里**信任**它。未信任的钩子不会运行。完整示例见 [examples/dsh-hooks.json](examples/dsh-hooks.json)。
+然后在 DSH 的钩子审查弹窗或「设置 → 钩子」里**信任**它。未信任的钩子不会运行。
+
+`agent/pre-step` 在一轮的**每一步**（每次模型调用）之前都会触发。`firstStepOnly: true` 让它每轮只在第一步（带你那条消息的一步）运行，后续步骤不启动进程；需要 dsh-hoos 带这个选项的版本（2026-10-27 起）。旧版本 dsh-hoos 会报不认识这个字段，去掉它也能用，后续步骤 fold-recall 会立即退出（约 0.1 秒）。完整示例见 [examples/dsh-hooks.json](examples/dsh-hooks.json)。
 
 > 如果你之前用过 dsh-compact-timing，请把它那条去掉。fold-recall 已经包含压缩时机判断，两个都留会重复提示。
 
