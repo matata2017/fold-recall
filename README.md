@@ -283,6 +283,10 @@ node bin/fold-recall.mjs recall <会话> "市场 PR 最后合进去没"
 # 手动整理
 node bin/fold-recall.mjs consolidate <会话> [--limit N]
 
+# 回忆评测：一组带标准答案的问题，逐题试运行（不写记录），统计命中率与误触发
+# 题目格式：[{"session":"会话前缀","prompt":"消息","expect":["b91"]}]，expect 为空表示不该触发回忆
+node bin/fold-recall.mjs eval <题目.json>
+
 # 给压缩时机打标注，用来检验阈值：这一轮之后有没有用到更早的细节
 node bin/fold-recall.mjs label <会话> <轮> <none|tail|older|unknown> [备注]
 

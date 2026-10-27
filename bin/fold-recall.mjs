@@ -12,7 +12,7 @@
  */
 import '../lib/quiet.mjs'
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -113,12 +113,52 @@ async function cmdConsolidate() {
   } finally { try { unlinkSync(LOCK) } catch {} }
 }
 
+/**
+ * 回忆评测：fold-recall eval <题目.json>
+ * 题目：[{ "session": "会话前缀", "prompt": "消息", "expect": ["b91", "其他会话前缀#b3"] }]，expect 为空 = 不该触发回忆。
+ * 每题试运行（不写任何记录），统计：该找回的找回了没（命中）、正确答案进没进候选、不该触发的有没有误触发。
+ */
+async function cmdEval() {
+  const items = JSON.parse(readFileSync(pos[1], 'utf8'))
+  const db = S.openStore(), bdb = B.openBili()
+  // 期望的块按"内容"比：复制/恢复出的会话继承了同样的块（不同会话、同样内容），找回哪一份都算对
+  let expectKeys = new Set()
+  const want = (item, b) => expectKeys.has(M.contentKey(b))
+  const rows = []
+  for (const item of items) {
+    const sid = resolveSession(bdb, item.session)
+    const { decision, mem } = await E.onPrompt(db, bdb, { sessionId: sid, turn: 99, prompt: item.prompt, peers: peersOf(db, sid), dryRun: true, timeoutMs: 20000 })
+    const byKey = new Map(mem.blocks.map((b) => [b.key, b]))
+    expectKeys = new Set(mem.blocks.filter((b) => (item.expect ?? []).some((e) => e.includes('#')
+      ? b.session_id.startsWith(e.split('#')[0]) && b.block_id === e.split('#')[1]
+      : b.session_id.startsWith(item.session) && b.block_id === e)).map(M.contentKey))
+    const recalled = (decision.recalled ?? []).map((k) => byKey.get(k)).filter(Boolean)
+    const cands = M.candidates(mem, D.MAX_OPTIONS, { current: sid })
+    const positive = (item.expect ?? []).length > 0
+    const row = {
+      prompt: item.prompt, positive, error: decision.error,
+      hit: positive ? recalled.some((b) => want(item, b)) : recalled.length === 0,
+      inCands: positive ? cands.some((b) => want(item, b)) : null,
+      got: recalled.map((b) => b.block_id).join('+') || '-',
+      p: decision.recall ? `${(+decision.recall.p).toFixed(2)}/${(+decision.recall.pNone).toFixed(2)}` : '-',
+      ms: decision.latency_ms ?? 0,
+    }
+    rows.push(row)
+    console.log(`${row.hit ? '✓' : '✗'} ${positive ? '问旧事' : '不该回忆'}  找回 ${row.got.padEnd(8)} 期望 ${(item.expect ?? []).join('|') || '无'}  ${positive ? (row.inCands ? '在候选里' : '不在候选里') : ''}  p/none ${row.p}  ${row.error ?? ''} ${item.prompt.slice(0, 40)}`)
+  }
+  const pos_ = rows.filter((r) => r.positive), neg = rows.filter((r) => !r.positive)
+  const pct = (a, b) => (b ? `${a}/${b}（${Math.round((a / b) * 100)}%）` : '-')
+  console.log(`\n问旧事：找回正确 ${pct(pos_.filter((r) => r.hit).length, pos_.length)}，正确答案进了候选 ${pct(pos_.filter((r) => r.inCands).length, pos_.length)}，什么也没找回 ${pos_.filter((r) => r.got === '-').length}，找错 ${pos_.filter((r) => r.got !== '-' && !r.hit).length}`)
+  console.log(`不该回忆：误触发 ${pct(neg.filter((r) => !r.hit).length, neg.length)}`)
+  console.log(`失败 ${rows.filter((r) => r.error).length}，决策延迟中位 ${rows.map((r) => r.ms).sort((a, b) => a - b)[Math.floor(rows.length / 2)]}ms`)
+}
+
 async function cmdRecall() {
   const db = S.openStore(), bdb = B.openBili()
   const sid = resolveSession(bdb, pos[1])
   const prompt = pos.slice(2).join(' ')
   const { context, decision, mem } = await E.onPrompt(db, bdb, { sessionId: sid, turn: Number(flag('--turn', 99)), prompt, peers: peersOf(db, sid), dryRun: true, timeoutMs: 15000 })
-  const top = M.candidates(mem, 8)
+  const top = M.candidates(mem, 8, { current: sid })
   console.log(`记忆块 ${mem.blocks.length}，候选 ${decision.candidates}，提起 ${decision.mentioned.length}，用量 ${decision.tokens}/${decision.window}，${decision.latency_ms ?? '-'}ms`)
   for (const b of top) console.log(`  ${b.block_id.padEnd(5)} rel=${b.rel.toFixed(2)} w=${b.w.toFixed(3)} ${b.pinned ? '📌' : '  '} ${b.type ?? '?'}  ${b.session_id === sid ? '' : '[' + b.session_id.slice(0, 14) + '] '}${b.topic.slice(0, 50)}`)
   console.log('判断：', JSON.stringify({ recall: decision.recall, latest: decision.latest, recalled: decision.recalled, timing: decision.timing && { tier: decision.timing.tier, pNew: +decision.timing.pNew.toFixed(2), s2: +decision.timing.s2.toFixed(2) }, forget: decision.forget, error: decision.error }))
@@ -186,7 +226,7 @@ async function cmdDoctor() {
   }
 }
 
-const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
+const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主
