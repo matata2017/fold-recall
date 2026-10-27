@@ -213,7 +213,7 @@ function cmdReport() {
   for (const b of [...bs].sort((a, b) => (b.mentions + b.recalls) - (a.mentions + a.recalls)).slice(0, 8).filter((b) => b.mentions + b.recalls))
     console.log(`  ${b.block_id.padEnd(5)} 提起 ${b.mentions} 找回 ${b.recalls} w=${b.w.toFixed(3)}  ${b.topic.slice(0, 50)}`)
   const runs = M.forgetRuns(mem, sid, { minBlocks: 1, maxBlocks: 999 })
-  console.log(`\n💤 下次将提示遗忘（本会话）：${runs.flat().length} 块`)
+  console.log(`\n💤 下次将遗忘（本会话）：${runs.flat().length} 块`)
   for (const r of runs) console.log('  ' + r.map((b) => `${b.block_id}「${b.topic.slice(0, 16)}」`).join('、'))
   const rows = db.prepare('select ts, turn, json from decisions where session_id=? order by ts desc limit 10').all(sid)
   if (rows.length) console.log('\n最近的判断：')
