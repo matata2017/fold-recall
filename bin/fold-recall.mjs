@@ -6,6 +6,7 @@
  *   fold-recall consolidate <session> [--limit N]   整理记忆：类型、重要性、前后关系（钩子会在后台自动跑）
  *   fold-recall recall <session> "<消息>"     试运行：这条消息会找回什么、会不会提示压缩/遗忘（不写任何记录）
  *   fold-recall report <session>             记忆概况：强度分布、钉住的、将被遗忘的、最近的判断
+ *   fold-recall repair <session> [--apply]    修复会话继承：把父会话已有的摘要套回子会话（默认只看计划）
  *   fold-recall label <session> <turn> <none|tail|older|unknown> [备注]
  *   fold-recall doctor                       检查环境
  */
@@ -20,6 +21,7 @@ import * as B from '../lib/bili.mjs'
 import * as D from '../lib/decide.mjs'
 import * as M from '../lib/memory.mjs'
 import * as E from '../lib/engine.mjs'
+import * as R from '../lib/repair.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
 const LOCK = join(S.HOME, 'consolidate.lock')
@@ -150,6 +152,21 @@ function cmdReport() {
   }
 }
 
+async function cmdRepair() {
+  const bdb = B.openBili()
+  if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
+  const sid = resolveSession(bdb, pos[1])
+  const plan = R.repairPlan(bdb, sid)
+  if (!plan.parent) return console.log(`${sid} 没有记录父会话（不是恢复/复制出来的会话），无需修复`)
+  console.log(`子会话 ${sid}\n父会话 ${plan.parent}\n可套回 ${plan.entries.length} 段：`)
+  for (const e of plan.entries) console.log(`  m${e.a}–m${e.z}（${e.refs} 条）← ${e.ids}  ${e.topic.slice(0, 50)}`)
+  for (const k of plan.skipped) console.log(`  跳过 ${k.ids}：${k.why}`)
+  if (!plan.entries.length) return
+  if (!args.includes('--apply')) return console.log('\n这是计划。确认后加 --apply 执行（经 billion-context 的 compress，原文不丢，可 decompress）')
+  const r = await R.applyRepair(plan.entries, sid)
+  console.log(`\nHTTP ${r.status} ${r.outcome ?? ''}，新建 ${r.blocksCreated ?? 0} 块\n${r.result.slice(0, 1200)}`)
+}
+
 function cmdLabel() {
   const [, sid, turn, need, ...note] = pos
   if (!['none', 'tail', 'older', 'unknown'].includes(need)) return console.error('用法：label <session> <turn> <none|tail|older|unknown> [备注]')
@@ -169,12 +186,12 @@ async function cmdDoctor() {
   }
 }
 
-const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, report: cmdReport, label: cmdLabel, doctor: cmdDoctor }
+const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主
 Promise.resolve(run()).catch((e) => { if (args[0] !== 'hook' || process.env.FOLD_RECALL_DEBUG) { console.error(e); process.exitCode = 1 } })
 
 function readFileHead() {
-  return `fold-recall <hook|consolidate|recall|report|label|doctor>  （详见 README）`
+  return `fold-recall <hook|consolidate|recall|report|repair|label|doctor>  （详见 README）`
 }

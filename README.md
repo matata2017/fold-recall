@@ -54,6 +54,7 @@ fold-recall 想让智能体的记忆**像人一样**：
 | **回忆** | 新消息涉及某段旧事时，找回那一段，以及这件事**最新进展**的那一段，放回上下文 | 每条用户消息 |
 | **压缩时机** | 明确换话题，或上一件做完又开始新任务时，提示先压缩上一件的历史 | 每条用户消息，有冷却 |
 | **试运行与报告** | 命令行查看记忆概况，或试一条消息"会找回什么" | 手动 |
+| **继承修复** | 会话换了 id、折叠状态没接全时，把老会话已有的摘要套回来 | 手动（`repair`） |
 
 所有提示都只是**往对话里加一段说明**，不会替模型做操作。任何一步失败或超时，**什么也不注入**。宁可不提示，也不乱提示。
 
@@ -272,6 +273,9 @@ node bin/fold-recall.mjs consolidate <会话> [--limit N]
 # 给压缩时机打标注，用来检验阈值：这一轮之后有没有用到更早的细节
 node bin/fold-recall.mjs label <会话> <轮> <none|tail|older|unknown> [备注]
 
+# 修复会话继承（见下文「会话换了 id 后卡住、超窗」）：默认只看计划，加 --apply 执行
+node bin/fold-recall.mjs repair <会话> [--apply]
+
 # 检查环境
 node bin/fold-recall.mjs doctor
 ```
@@ -290,6 +294,29 @@ node bin/fold-recall.mjs doctor
 🔥 最常被提起/找回：
   b69   提起 1 找回 1 w=1.518  应用被干趴：SELF_ID 冲突与 v0.5.5
 💤 下次将提示遗忘（本会话）：31 块
+```
+
+### 会话换了 id 后卡住、超窗：`repair`
+
+宿主有时会给同一段对话换一个新的会话 id。比如 DSH 重启后恢复会话，界面上看还是同一段对话。这时 billion-context 本应把老会话的折叠状态接过来；但**历史里有图片等非文本内容时，继承会降级**，新 id 只接到一部分摘要块。
+
+剩下的几十万 token 只能靠"请求前现场压缩"，这一步慢、会超时，可能出现：
+- 请求卡住几分钟，最后报 `stream idle timeout`；
+- 重试时报 `context window exceeds limit`。
+
+2026-10-26 实测的一次：新 id 只接到老会话 57 个块里的 37 个。第一次请求现场压了 5 分钟才压掉 2–3 成，DSH 超时断开；重试时带着 98.7 万 token 发出去，被模型拒绝。
+
+`repair` 不另起炉灶，用的是 billion-context 自己的机制：
+- 找到新 id 的父会话（billion-context 记在 `derivedFrom`）。
+- 把父会话里**模型当初写好的摘要**，用 billion-context 自己的 `compress` 工具套回新 id 的相同范围。
+- 新 id 里已有的块不动；摘要太短的指针块、噪声块不拿来替换大段原文；首尾对齐到新 id 里真实存在的消息编号。
+- 不调模型，几秒完成。不划算的范围 billion-context 会自己拒绝，原文仍在库里，可以 `decompress`。
+
+那一次修复用 8 个范围把上下文从约 95 万压到约 58 万，请求恢复正常。
+
+```sh
+node bin/fold-recall.mjs repair session-f88b5df8            # 看计划
+node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 ```
 
 ### 数据在哪

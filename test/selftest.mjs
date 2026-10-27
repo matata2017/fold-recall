@@ -145,6 +145,23 @@ try {
       assert.doesNotMatch(context, /回忆|压缩时机/)
     } finally { process.env.FOLD_RECALL_ENDPOINT = saved }
   })
+  await t('继承修复：只套回子会话没覆盖的父块，避开已有块，跳过太短的摘要', async () => {
+    const R = await import('../lib/repair.mjs')
+    const w = new DatabaseSync(process.env.BILI_INDEX_DB)
+    const KID = 'session-kid'
+    w.prepare('insert into sessions values (?,?,?,?,?)').run(KID, T0 + 3e6, T0 + 3e6, '{}', JSON.stringify({ derivedFrom: SID }))
+    for (const i of [1, 2, 3, 5, 6, 8, ...Array.from({ length: 700 }, (_, k) => 201 + k)]) w.prepare('insert into refs values (?,?,?,?,?)').run(KID, i, 'k' + i, 'm' + i, i)
+    const long = '要点。'.repeat(120)
+    w.prepare('insert into blocks values (?,?,?,?,?,?,?,?,?)').run('b1', KID, 0, 201, 400, 1, 1, T0 + 3e6, JSON.stringify({ topic: '已继承', summary: long }))
+    w.prepare('update blocks set payload_json=? where session_id=? and block_id=?').run(JSON.stringify({ topic: '部署脚本 deploy.sh 最终结果', summary: long }), SID, 'b3')
+    w.close()
+    const plan = R.repairPlan(bdb, KID)
+    assert.equal(plan.parent, SID)
+    const got = plan.entries.map((e) => `${e.ids}:${e.a}-${e.z}`)
+    assert.deepEqual(got, ['b3:401-600'])                        // b2 已被子会话 b1 覆盖；b1、b4 摘要太短被跳过；b5 的范围子会话里没有消息
+    assert.ok(plan.skipped.some((s) => s.ids === 'b4'))
+    assert.match(R.repairContent(plan.entries), /^m00401–m00600 部署脚本 deploy\.sh 最终结果\n要点/)
+  })
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')
     assert.equal(D.redact('key sk-abcdefghijklmnopqrstuvwxyz ok'), 'key <已脱敏> ok')
