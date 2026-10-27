@@ -148,7 +148,7 @@ function cmdReport() {
   if (rows.length) console.log('\n最近的判断：')
   for (const r of rows.reverse()) {
     const d = JSON.parse(r.json)
-    console.log(`  ${new Date(r.ts).toISOString().slice(5, 16)} T${r.turn} 候选${d.candidates} ${d.recalled ? '找回 ' + d.recalled.map((k) => k.split('#')[1]).join('+') : ''} ${d.timing?.tier ? '时机:' + d.timing.tier : ''} ${d.forget ? '遗忘 ' + d.forget.length : ''} ${d.error ? '错误:' + d.error : ''} ${d.total_ms}ms`)
+    console.log(`  ${new Date(r.ts).toISOString().slice(5, 16)} T${r.turn} 候选${d.candidates} ${d.recalled ? '找回 ' + d.recalled.map((k) => k.split('#')[1]).join('+') : ''} ${d.timing?.tier ? '时机:' + d.timing.tier : ''} ${d.forget ? '遗忘 ' + (d.forget.blocks ?? d.forget).length + ' 块' + (d.forget.outcome ? '(' + d.forget.outcome + ')' : '') : ''} ${d.error ? '错误:' + d.error : ''} ${d.total_ms}ms`)
   }
 }
 

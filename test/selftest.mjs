@@ -53,9 +53,16 @@ bdbW.close()
 
 // ---------------------------------------------------------------- 假决策接口：按题目选第一个"像样"的答案
 let calls = 0
+const compressed = []                                    // 假的 billion-context 插件接口收到的 compress
 const server = createServer((req, res) => {
   let body = ''
   req.on('data', (d) => (body += d)).on('end', () => {
+    res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/__bili/plugin/tool') {
+      const j = JSON.parse(body)
+      compressed.push(j)
+      return res.end(JSON.stringify({ ok: true, tool: j.tool, outcome: 'applied', blocksCreated: 1, result: '[Compressed]' }))
+    }
     calls++
     const { questions, state } = JSON.parse(body)
     const answers = {}
@@ -75,6 +82,7 @@ const server = createServer((req, res) => {
 })
 await new Promise((r) => server.listen(0, r))
 process.env.FOLD_RECALL_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/decisions`
+process.env.BILI_PROXY = `http://127.0.0.1:${server.address().port}`          // 绝不碰真实的 billion-context
 
 const S = await import('../lib/store.mjs')
 const B = await import('../lib/bili.mjs')
@@ -113,22 +121,40 @@ try {
     assert.deepEqual(ids, ['b1', 'b2', 'b3', 'b4'])
     assert.ok(!ids.includes('b5'))
   })
-  await t('回忆：问"最后结果"→ 找回最终结果那段，并记一次强化', async () => {
+  await t('这一轮刚提起/找回的块不会被同时遗忘', async () => {
+    // 提到 deploy：b2、b3 被提起/找回，剩下的旧块只有 b1、b4，不够 3 块，不遗忘
+    const { decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 8, prompt: 'deploy.sh 部署脚本最后修好没', peers, dryRun: true })
+    assert.equal(decision.forget, undefined)
+    assert.equal(compressed.length, 0)
+  })
+  await t('遗忘在后台执行：经 billion-context 的 compress 折成只列主题的索引；对话里只有回忆的一两行', async () => {
+    // 换个不相关的话题：旧块 b1–b4 都淡了，后台折成一个索引块；时机判断只记录、不注入
+    const r9 = await E.onPrompt(db, bdb, { sessionId: SID, turn: 9, prompt: '写个爬虫抓一下天气预报', peers })
+    assert.equal(r9.context, '')
+    assert.equal(compressed.length, 1)
+    assert.equal(compressed[0].conversationId, SID)
+    assert.match(compressed[0].args.content, /^m00001–m00800 旧工作索引（fold-recall 遗忘，4 段）\n- b1「早期排查日志格式」/)
+    assert.equal(r9.decision.forget.outcome, 'applied')
+    assert.equal(r9.decision.timing?.tier, 'switch')                  // 换话题：判断照记，但不注入
+    // 问起来时照样找回（这里的假 billion-context 不真的折叠，b3 仍在眼前，所以提示 decompress）
     const { context, decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 10, prompt: 'deploy.sh 部署脚本最后修好没', peers })
-    assert.match(context, /\[回忆 · fold-recall\].*deploy\.sh 最终结果/)
-    assert.match(context, /decompress 展开 b3/)                     // 本会话折叠中的块：让模型展开
+    assert.match(context, /\[回忆 · fold-recall\][\s\S]*deploy\.sh 最终结果/)
+    assert.match(context, /decompress b3/)
+    assert.ok(context.split('\n').length <= 3)                        // 只注入一两行
+    assert.doesNotMatch(context, /遗忘|压缩时机/)
     assert.deepEqual(decision.recalled, [`${SID}#b3`])
     const mem = E.loadAll(db, bdb, peers)
     const b3 = mem.blocks.find((b) => b.key === `${SID}#b3`)
     assert.equal(b3.recalls, 1)
     assert.ok(b3.w > mem.blocks.find((b) => b.key === `${SID}#b1`).w * 10)   // 刚被找回的远比没用过的牢
   })
-  await t('被找回过的块不再提示遗忘；遗忘有冷却', async () => {
+  await t('被找回过的块不再遗忘；遗忘有冷却；时机只记录', async () => {
     const mem = E.loadAll(db, bdb, peers)
     assert.ok(!M.forgetRuns(mem, SID).flat().some((b) => b.block_id === 'b3'))
     const { decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 11, prompt: '写个爬虫抓天气预报', peers })
-    assert.equal(decision.forget, undefined)                          // 上一轮已提示过
-    assert.equal(decision.timing?.tier, 'switch')                     // 换话题 → 提示压缩
+    assert.equal(decision.forget, undefined)                          // 上一轮刚遗忘过，冷却中
+    assert.equal(decision.timing_asked, false)                        // 时机判断也有冷却（上次在第 9 轮）
+    assert.equal(compressed.length, 1)
   })
   await t('"继续"这类消息不触发回忆、不调用回忆题', async () => {
     const before = calls

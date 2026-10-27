@@ -50,13 +50,13 @@ fold-recall 想让智能体的记忆**像人一样**：
 | **记忆强度** | 每个记忆块都有强度，随"之后又做了多少事"衰减，被提起或被找回时加强 | 每条用户消息 |
 | **整理** | 决策模型给每个新记忆块判**类型**（偏好/约定、知识、过程、噪声）、**重要性**，以及它是哪段旧工作的**后续** | 后台进程，自动 |
 | **钉住** | 偏好/约定，或重要性最高的约一成，永不遗忘 | 整理之后 |
-| **遗忘** | 保持度掉到遗忘线以下的块，提示模型用 `compress` 把它们合并成一行索引，拿出上下文 | 每条消息检查，有冷却 |
-| **回忆** | 新消息涉及某段旧事时，找回那一段，以及这件事**最新进展**的那一段，放回上下文 | 每条用户消息 |
-| **压缩时机** | 明确换话题，或上一件做完又开始新任务时，提示先压缩上一件的历史 | 每条用户消息，有冷却 |
+| **遗忘** | 保持度掉到遗忘线以下的块，**后台直接**经 billion-context 的 `compress` 合成一个只列主题的索引块，拿出上下文；对话里不显示 | 每条消息检查，有冷却 |
+| **回忆** | 新消息涉及某段旧事时，找回那一段，以及这件事**最新进展**的那一段，用一两行告诉模型 | 每条用户消息 |
+| **压缩时机** | 判断是否换话题、上一件是否做完；默认**只记录不注入**（billion-context 自己会提醒压缩），可改为注入提示 | 每条用户消息，有冷却 |
 | **试运行与报告** | 命令行查看记忆概况，或试一条消息"会找回什么" | 手动 |
 | **继承修复** | 会话换了 id、折叠状态没接全时，把老会话已有的摘要套回来 | 手动（`repair`） |
 
-所有提示都只是**往对话里加一段说明**，不会替模型做操作。任何一步失败或超时，**什么也不注入**。宁可不提示，也不乱提示。
+**尽量不打扰对话**：对话里只会出现一两行 `[回忆]`；遗忘在后台做完，压缩时机只记在日志里，用 `report` 查看。任何一步失败或超时，**什么也不注入、什么也不改**。
 
 ---
 
@@ -123,15 +123,29 @@ w = Σ  c_i · (age_i + 1) ^ -0.5
 
 ### 遗忘：很淡的不进上下文
 
-满足以下全部条件的块，会出现在 `[遗忘]` 提示里：
+满足以下全部条件的块会被遗忘：
 
 - 属于**当前会话**，且仍在上下文中；
 - 已整理、未钉住；
+- 这一轮没有被提起、没有被找回；
 - **保持度 < 遗忘线**。遗忘线 = `1500^-0.5`，约等于"之后 1500 条消息都没用到"。
 
 遗忘只按**本会话**经过的消息算：恢复一个旧会话时，它眼前的内容不会因为别的会话做了很多事而被挤掉。
 
-提示会按原文位置把连续的块合成段，请模型调用 `compress` 把每段压成一行索引。每次最多 12 块，至少 3 块才提示，两次提示间隔 ≥ 300 条消息。**原文仍完整保存在 billion-context 库里**，之后被问到时由回忆找回。
+**怎么忘**：fold-recall 按原文位置把连续的块合成段，自己调用 billion-context 的 `compress`（经它的插件接口），把每段换成一个只列主题的索引块：
+
+```
+m00001–m00806 旧工作索引（fold-recall 遗忘，5 段）
+- b1「监工 session-6a3dc8b0（first pass）」2026-10-22
+- b3「市场判定、命中率、GitHub 账号准备」2026-10-22
+…
+细节已移出上下文；需要时用 decompress 或 search_context 找回。
+```
+
+- 原来的块被嵌在索引块里（billion-context 的嵌套块），`decompress` 可以一层层展开；**原文仍完整保存在库里**，被问到时由回忆找回。
+- 两个块之间如果还有没折叠的原始消息，就在那里断开，不把原文吞进索引。
+- 每次最多 12 块，至少 3 块才动手，两次间隔 ≥ 300 条消息。
+- 不想自动执行：`FOLD_RECALL_FORGET=hint` 改回"提示模型去做"，`off` 只记录。
 
 ### 回忆：被问起时再想起
 
@@ -144,8 +158,8 @@ w = Σ  c_i · (age_i + 1) ^ -0.5
 3. **接受条件**：选中段的概率 ≥ 0.5，**或**"都不需要"的概率 ≤ 0.05。第二个条件对应的情况是：确实需要旧记忆，只是相似的段太多，概率被摊薄了。
 4. **带上最新进展**：`latest` 选中且概率 ≥ 0.4 的那段；否则沿整理得到的"后续"链走到最新一段，跳过噪声。
 5. **怎么放回去**：
-   - 本会话里仍在折叠中的块 → 提示模型 `decompress bN` 展开原文；
-   - 已被合并/遗忘的块、其他会话的块 → 直接注入它的摘要（≤900 字）。
+   - 本会话里仍在折叠中的块 → 一行：主题 + "要细节先 `decompress bN`"；
+   - 已被合并/遗忘的块、其他会话的块 → 一行：主题、日期 + 摘要开头（≤400 字）。
 6. 被找回的块记一次"回忆"，强度大幅提升，短期内不会再被遗忘。
 
 ### 压缩时机
@@ -153,9 +167,10 @@ w = Σ  c_i · (age_i + 1) ^ -0.5
 沿用 compact-adviser 的两道原子题（逐字），再加一道"新请求与之前工作的关系"：
 
 - `pNew` = 1 − P(继续同一项工作)；`S1` = P(完成) × (0.5 + 0.5 × P(动手做))；`S2` = S1 × pNew
-- **换话题**：pNew ≥ 0.85 → 提示压缩。摘要要保留未完成事项，用户之后可能切回来。
-- **做完换新**：S2 ≥ 0.5 → 提示压缩。
-- 闸门：本会话第 3 轮起、上下文 ≥ 4 万 token、距上次提示 ≥ 3 轮。
+- **换话题**：pNew ≥ 0.85。
+- **做完换新**：S2 ≥ 0.5。
+- 闸门：本会话第 3 轮起、上下文 ≥ 4 万 token、距上次判定 ≥ 3 轮。
+- 默认**只记录**到 `decisions` 表（`report` 可看），不注入：billion-context 自己已经按增长提醒压缩，再加一段提示只会打扰对话。`FOLD_RECALL_TIMING=hint` 可改为注入提示（会要求摘要保留未完成事项）。
 
 ### 性能与可靠性
 
@@ -242,19 +257,14 @@ node bin/fold-recall.mjs consolidate <会话> --limit 500
 
 ## 使用
 
-装好以后**不需要做任何事**，正常和智能体对话即可。你会在对话里看到这几类说明（模型能看到，你也能在钩子记录里看到）：
+装好以后**不需要做任何事**，正常和智能体对话即可。对话里只会在问到旧事时出现一两行：
 
 ```
-[回忆 · fold-recall] 这个请求涉及较早的工作「市场 PR 的最终结果」（b91，已折叠）。需要细节时，先调用 decompress 展开 b91。
-
-[回忆 · fold-recall] 「Mnemon→Hindsight provider 接线收尾与端到端」（2026-10-21，本会话的 b65；原文仍在 billion-context 库中）：
-……摘要……
-
-[压缩时机 · fold-recall] 用户的新请求是一项和之前工作不同的新任务（把握 99%，当前上下文已用 30%）……请先调用 compress……
-
-[遗忘 · fold-recall] 下面这些旧摘要块很久没用到了……请调用 compress 把每一段合并成一个简短的索引块……
-- m00001–m00410：b1「监工 session…」、b3「市场判定…」……
+[回忆 · fold-recall] 这条消息涉及较早的工作：
+- b91「市场 PR 的最终结果（重要，已收官）」：已折叠，要细节先 decompress b91
 ```
+
+遗忘在后台执行，压缩时机只记录，都不出现在对话里。它们做了什么，用 `report <会话>` 查看"最近的判断"。
 
 ### 命令行
 
@@ -340,6 +350,9 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 | `FOLD_RECALL_ENDPOINT` | `https://api.bamboonode.dev/v1/decisions`（StartLux） | 任何同形接口都可以：请求 `{model, state, questions}`，返回 `{answers: {题号: {probabilities: {选项: 概率}}}}` |
 | `FOLD_RECALL_MODEL` | `startlux-decision-27b-autothink` | |
 | `FOLD_RECALL_TIMEOUT_MS` | `6000` | 钩子里等决策的上限，超时什么也不注入 |
+| `FOLD_RECALL_FORGET` | `auto` | 遗忘：`auto` 后台直接折成索引 · `hint` 注入提示让模型做 · `off` 只记录 |
+| `FOLD_RECALL_TIMING` | `off` | 压缩时机：`off` 只记录 · `hint` 注入提示 |
+| `BILI_PROXY` | `http://127.0.0.1:18787` | billion-context 代理地址（后台遗忘、`repair` 经它的插件接口写入） |
 | `FOLD_RECALL_HOME` | `~/.fold-recall` | 状态库与 `.env` 的位置 |
 | `BILI_INDEX_DB` | `~/.local/share/billion-context/sessions/index.db` | billion-context 的库 |
 | `FOLD_RECALL_DEBUG` | — | 设为 1 时，钩子把异常打到 stderr |
@@ -439,9 +452,9 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 - **Strength.** Each block has an ACT-R strength `Σ c·(age+1)^-0.5`, with age counted in messages elapsed. Creation counts c=1, every mention c=0.5, every recall c=1. Frequently discussed things stay strong; neglected ones fade.
 - **Consolidation.** A background pass asks the decision model for each block's type (preference / knowledge / episode / noise), its importance, and which earlier block it continues.
 - **Pinning.** Preferences, and blocks with P(key) ≥ 0.8, are never forgotten. Everything else fades more slowly the more important it is: `retention = strength × (1 + P(key))`.
-- **Forgetting.** In-context blocks whose retention falls below about 1500 messages of disuse are suggested for `compress` into a one-line index. Originals stay in the database.
+- **Forgetting.** In-context blocks whose retention falls below about 1500 messages of disuse are folded in the background, through billion-context's own `compress`, into a topic-only index block (the old blocks nest inside it). Nothing appears in the chat; originals stay in the database.
 - **Recall.** Each user message gets up to 24 candidates: lexical matches, the block after each match, and recent strong memories. The decision model picks what to bring back and where the latest progress is. Folded blocks in the current session get a `decompress` hint; forgotten or cross-session blocks have their summary injected.
-- **Compaction timing.** On a clear topic switch, it hints `compress`.
+- **Compaction timing.** Topic switches are judged and logged; billion-context already nudges compaction, so nothing is injected unless `FOLD_RECALL_TIMING=hint`.
 
 **Guarantees**
 
