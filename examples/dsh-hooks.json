@@ -7,8 +7,15 @@
         "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
         "timeout": 12,
         "statusMessage": "fold-recall: 回忆与遗忘",
-        "additionalContextLimit": 2500,
-        "firstStepOnly": true
+        "additionalContextLimit": 2500
+      }
+    ],
+    "agent/turn-stopping": [
+      {
+        "command": "node \"/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+        "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+        "timeout": 10,
+        "statusMessage": "fold-recall: 记录本轮事件"
       }
     ]
   }

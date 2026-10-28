@@ -57,9 +57,10 @@ fold-recall 想让智能体的记忆**像人一样**：
 | **压缩时机** | 判断是否换话题、上一件是否做完；默认**只记录不注入**（billion-context 自己会提醒压缩），可改为注入提示 | 每条用户消息，有冷却 |
 | **试运行与报告** | 命令行查看记忆概况，或试一条消息"会找回什么" | 手动 |
 | **作废** | 内容被推翻的块（旧设定、已更正的结论）不再被找回、不再加强、追最新进展时跳过，可被移出上下文；原文保留 | 手动（`supersede`），或由智能体在发现过时回忆时调用 |
+| **续接快照** | 每轮结束记一条事件（你这轮的请求、报错、git 改了哪些文件 / 新提交 / 改过又还原的、回复里提到的下一步和问你的话）；billion-context 一压缩、刚做的事被折进摘要，就把这些事实注入一段 ≤1500 字的快照，让模型接着做。全程不调用模型 | 每轮结束记录；压缩后注入一次 |
 | **继承修复** | 会话换了 id、折叠状态没接全时，把老会话已有的摘要套回来 | 手动（`repair`） |
 
-**尽量不打扰对话**：对话里只会出现一两行 `[回忆]`；遗忘在后台做完，压缩时机只记在日志里，用 `report` 查看。任何一步失败或超时，**什么也不注入、什么也不改**。
+**尽量不打扰对话**：对话里只会出现一两行 `[回忆]`，压缩之后多一段 `[续接]`；遗忘在后台做完，压缩时机只记在日志里，用 `report` 查看。任何一步失败或超时，**什么也不注入、什么也不改**。
 
 ---
 
@@ -220,7 +221,7 @@ node test/selftest.mjs              # 自测：假数据 + 本地假接口，不
 
 ### 4. 挂进宿主
 
-**DSH**（需要 dsh-hoos 插件）：把下面这条加进 `~/.dsh/hooks.json` 的 `hooks["agent/pre-step"]` 数组：
+**DSH**（需要 dsh-hoos 插件）：在 `~/.dsh/hooks.json` 里加两条（完整示例见 [examples/dsh-hooks.json](examples/dsh-hooks.json)）。`hooks["agent/pre-step"]`：
 
 ```json
 {
@@ -228,14 +229,24 @@ node test/selftest.mjs              # 自测：假数据 + 本地假接口，不
   "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
   "timeout": 12,
   "statusMessage": "fold-recall: 回忆与遗忘",
-  "additionalContextLimit": 2500,
-  "firstStepOnly": true
+  "additionalContextLimit": 2500
 }
 ```
 
-然后在 DSH 的钩子审查弹窗或「设置 → 钩子」里**信任**它。未信任的钩子不会运行。
+`hooks["agent/turn-stopping"]`（每轮结束记事件，不输出任何东西）：
 
-`agent/pre-step` 在一轮的**每一步**（每次模型调用）之前都会触发。`firstStepOnly: true` 让它每轮只在第一步（带你那条消息的一步）运行，后续步骤不启动进程；需要 dsh-hoos 带这个选项的版本（2026-10-27 起）。旧版本 dsh-hoos 会忽略这个字段，每一步照常触发；那也不影响使用，没有用户消息的步骤 fold-recall 会立即退出（约 0.1 秒）。完整示例见 [examples/dsh-hooks.json](examples/dsh-hooks.json)。
+```json
+{
+  "command": "node \"/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+  "commandWindows": "node.exe \"C:/path/to/fold-recall/bin/fold-recall.mjs\" hook",
+  "timeout": 10,
+  "statusMessage": "fold-recall: 记录本轮事件"
+}
+```
+
+然后在 DSH 的钩子审查弹窗或「设置 → 钩子」里**信任**它们。未信任的钩子不会运行；改过的钩子要重新信任。
+
+`agent/pre-step` 在一轮的**每一步**（每次模型调用）之前都会触发。回忆、遗忘、压缩时机每轮只在第一步（带你那条消息的一步）做；其余步骤只查"是不是刚压缩过"（约 0.05 秒），因为压缩常发生在一轮中间的长任务里。不想每步都启动进程，可以加 `"firstStepOnly": true`，代价是一轮中间的压缩要等到下一条消息才补快照。
 
 > 如果你之前用过 dsh-compact-timing，请把它那条去掉。fold-recall 已经包含压缩时机判断，两个都留会重复提示。
 
@@ -272,6 +283,24 @@ node bin/fold-recall.mjs consolidate <会话> --limit 500
 - b91「市场 PR 的最终结果（重要，已收官）」：已折叠，要细节先 decompress b91
 ```
 
+压缩之后（billion-context 新建的摘要块盖住了最近一轮），下一步会多一段续接快照，例如：
+
+```
+[续接 · fold-recall] 上下文刚被压缩（新摘要 b91）。下面是压缩前的工作状态，直接取自 git 和对话记录，未经模型改写；和摘要不一致时以这里为准：
+最近的请求（旧→新）：
+- 第 41 轮：把支付回调的签名校验做了
+未提交的改动（pay-service，HEAD 3f2a1c0）：src/callback.ts +42 −3、test/callback.test.ts 新文件
+本会话的提交：9d1e7b2 回调签名校验
+改过又还原的文件：src/config.ts（第 40 轮前后）
+最近的报错：
+- bash：npm test 2 failed …
+提到过的下一步 / 待办（可能已完成，先核对）：
+- 下一步：补回调重放的测试。
+- 要提交吗？
+```
+
+只在压缩后注入一次。fold-recall 自己的后台遗忘只折很旧的块，不会触发它。
+
 遗忘在后台执行，压缩时机只记录，都不出现在对话里。它们做了什么，用 `report <会话>` 查看"最近的判断"。
 
 ### 命令行
@@ -284,6 +313,9 @@ node bin/fold-recall.mjs report <会话>
 
 # 试运行：这条消息会找回什么、会不会提示压缩/遗忘（不写任何记录，可以随便试）
 node bin/fold-recall.mjs recall <会话> "市场 PR 最后合进去没"
+
+# 续接快照：现在压缩的话会注入什么；--log 列出逐轮事件记录
+node bin/fold-recall.mjs snapshot <会话> [--log]
 
 # 手动整理
 node bin/fold-recall.mjs consolidate <会话> [--limit N]
@@ -373,6 +405,7 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 | `FOLD_RECALL_TIMEOUT_MS` | `6000` | 钩子里等决策的上限，超时什么也不注入 |
 | `FOLD_RECALL_FORGET` | `auto` | 遗忘：`auto` 后台直接折成索引 · `hint` 注入提示让模型做 · `off` 只记录 |
 | `FOLD_RECALL_TIMING` | `off` | 压缩时机：`off` 只记录 · `hint` 注入提示 |
+| `FOLD_RECALL_JOURNAL` | `on` | `off` 关闭事件记录与续接快照 |
 | `FOLD_RECALL_DEFER` | `preference,knowledge` | 回忆时只给指引、不带摘要的类型（交给记忆插件）；`none` 关闭 |
 | `BILI_PROXY` | `http://127.0.0.1:18787` | billion-context 代理地址（后台遗忘、`repair` 经它的插件接口写入） |
 | `FOLD_RECALL_HOME` | `~/.fold-recall` | 状态库与 `.env` 的位置 |
@@ -599,6 +632,7 @@ node bin/fold-recall.mjs label <会话前缀> <轮次> older "它忘了之前定
 - **Pinning.** Preferences, and blocks with P(key) ≥ 0.8, are never forgotten. Everything else fades more slowly the more important it is: `retention = strength × (1 + P(key))`.
 - **Forgetting.** In-context blocks whose retention falls below about 1500 messages of disuse are folded in the background, through billion-context's own `compress`, into a topic-only index block (the old blocks nest inside it). Nothing appears in the chat; originals stay in the database.
 - **Recall.** Each user message gets up to 24 candidates: lexical matches, the block after each match, and recent strong memories. The decision model picks what to bring back and where the latest progress is. Folded blocks in the current session get a `decompress` hint; forgotten or cross-session blocks have their summary injected. Preferences and knowledge only get a one-line pointer: dsh-mnemon (Hindsight) owns those across sessions, so injecting an old summary would duplicate or contradict it (`FOLD_RECALL_DEFER=none` turns this off).
+- **Continuation snapshot.** At the end of every turn a journal entry records the request, tool errors, git state (dirty files, new commits, files changed then reverted) and the next steps / open questions from the reply. When billion-context folds the latest turn into a summary, a ≤1500-char snapshot of those facts is injected once, so the model can pick up where it was. No model calls.
 - **Compaction timing.** Topic switches are judged and logged; billion-context already nudges compaction, so nothing is injected unless `FOLD_RECALL_TIMING=hint`.
 
 **Guarantees**

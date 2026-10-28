@@ -9,6 +9,7 @@
  *   fold-recall repair <session> [--apply]    修复会话继承：把父会话已有的摘要套回子会话（默认只看计划）
  *   fold-recall label <session> <turn> <none|tail|older|unknown> [备注]
  *   fold-recall supersede <session> <bN> [原因] / unsupersede <session> <bN> / superseded   作废被推翻的记忆块
+ *   fold-recall snapshot <session> [--log]    续接快照：压缩后会注入什么；--log 列出逐轮事件记录
  *   fold-recall doctor                       检查环境
  */
 import '../lib/quiet.mjs'
@@ -24,6 +25,7 @@ import * as M from '../lib/memory.mjs'
 import * as E from '../lib/engine.mjs'
 import * as R from '../lib/repair.mjs'
 import * as RP from '../lib/replay.mjs'
+import * as J from '../lib/journal.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
 const LOCK = join(S.HOME, 'consolidate.lock')
@@ -98,27 +100,35 @@ async function hook() {
   const ev = p.hook_event_name
   const prompt = String(p.prompt ?? '').trim()
   const sessionId = String(p.session_id ?? '')
-  if (!prompt || !sessionId) return                                           // DSH：只有每轮第一步带用户消息
+  if (!sessionId) return
   if (/^\[dsh-mnemon:/.test(prompt)) return                                   // 记忆插件的内部委派
   if (isDelegated(p, sessionId)) {                                            // 子会话：不回忆、不记录（防锚定）
     if (process.env.FOLD_RECALL_DEBUG) process.stderr.write(`fold-recall: 跳过子会话 ${sessionId}\n`)
     return
   }
   let host, turn
-  if (ev === 'agent/pre-step') { host = 'dsh'; turn = Number(String(p.turn_id ?? '').split('#').pop()) }
+  if (ev === 'agent/pre-step' || ev === 'agent/turn-stopping') { host = 'dsh'; turn = Number(String(p.turn_id ?? '').split('#').pop()) }
   else if (ev === 'UserPromptSubmit') { host = 'claude-code'; turn = `t${Date.now()}` }
   else return
 
   const db = S.openStore()
   S.rememberSession(db, sessionId, p.cwd, host)
-  if (!S.firstSeen(db, sessionId, turn)) return                              // 同一轮只处理一次
   const bdb = B.openBili()
   if (!bdb) return
-  const { context, decision } = await E.onPrompt(db, bdb, {
-    sessionId, turn, prompt, peers: peersOf(db, sessionId),
-    timeoutMs: Number(process.env.FOLD_RECALL_TIMEOUT_MS || 6000),
-  })
-  if (decision.unjudged > 0 && D.apiKey()) spawnConsolidate(sessionId)
+  // 每轮结束：记一条事件（请求、报错、git 改动/提交/撤回、待办），不输出
+  if (ev === 'agent/turn-stopping') return void J.recordTurn(db, bdb, { sessionId, turn, cwd: p.cwd, lastReply: p.last_assistant_message })
+  // 每一步：刚被压缩过就先注入续接快照（压缩可能发生在一轮中间）
+  const parts = [J.continuation(db, bdb, sessionId, p.cwd)]
+  // 每轮第一步：回忆 / 遗忘 / 压缩时机（同一轮只处理一次）
+  if (prompt && S.firstSeen(db, sessionId, turn)) {
+    const { context, decision } = await E.onPrompt(db, bdb, {
+      sessionId, turn, prompt, peers: peersOf(db, sessionId),
+      timeoutMs: Number(process.env.FOLD_RECALL_TIMEOUT_MS || 6000),
+    })
+    if (decision.unjudged > 0 && D.apiKey()) spawnConsolidate(sessionId)
+    parts.push(context)
+  }
+  const context = parts.filter(Boolean).join('\n\n')
   if (context) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: ev, additionalContext: context } }) + '\n')
 }
 
@@ -314,6 +324,19 @@ function cmdSuperseded() {
   for (const r of rows) console.log(`${new Date(r.ts).toISOString().slice(0, 10)}  ${r.key}  ${r.reason}`)
 }
 
+// 续接快照：压缩后会注入什么（只看，不改"上次检查"的时刻）；--log 列出逐轮事件记录
+function cmdSnapshot() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
+  const sid = resolveSession(bdb, pos[1] ?? '')
+  const j = S.journalFor(db, sid, 30)
+  if (!j.length) return console.log(`${sid} 还没有事件记录（每轮结束时由 agent/turn-stopping 钩子记录）`)
+  if (args.includes('--log')) for (const r of j) console.log(`第 ${r.turn} 轮 ${new Date(r.ts).toISOString().slice(5, 16)} 消息≤${r.end_ref}  ${D.oneLine(r.user).slice(0, 60)}` +
+    `${r.commits?.length ? `\n  提交：${r.commits.join('；')}` : ''}${r.reverted?.length ? `\n  还原：${r.reverted.join('、')}` : ''}` +
+    `${r.errors?.length ? `\n  报错：${r.errors.length} 条` : ''}${r.todos?.length ? `\n  待办：${r.todos.join(' / ')}` : ''}`)
+  console.log((args.includes('--log') ? '\n' : '') + J.snapshotText(db, sid, null))
+}
+
 async function cmdDoctor() {
   const [maj, min] = process.versions.node.split('.').map(Number)
   console.log(`node ${process.versions.node} ${maj > 22 || (maj === 22 && min >= 5) ? 'OK' : '需要 ≥ 22.5（node:sqlite）'}`)
@@ -327,12 +350,12 @@ async function cmdDoctor() {
 }
 
 const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor,
-  supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded }
+  supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded, snapshot: cmdSnapshot }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主
 Promise.resolve(run()).catch((e) => { if (args[0] !== 'hook' || process.env.FOLD_RECALL_DEBUG) { console.error(e); process.exitCode = 1 } })
 
 function readFileHead() {
-  return `fold-recall <hook|consolidate|recall|report|repair|label|supersede|unsupersede|superseded|doctor>  （详见 README）`
+  return `fold-recall <hook|consolidate|recall|report|snapshot|repair|label|supersede|unsupersede|superseded|doctor>  （详见 README）`
 }

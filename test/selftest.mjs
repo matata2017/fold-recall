@@ -48,6 +48,7 @@ function put(role, kind, obj) {
 put('user', 'text', { text: '把支付回调的签名校验做了' })
 put('user', 'text', { text: 'Current runtime context. This snapshot supersedes earlier ones.' })   // 宿主注入，应被跳过
 put('assistant', 'tool-call', { toolName: 'edit', text: '{}' })
+put('tool', 'tool-result', { toolName: 'bash', toolIsError: true, text: 'push 被拒 key=sk-abcdefghijklmnopqrstuvwxyz' })   // bili 用 toolIsError 标报错
 put('assistant', 'text', { text: '签名校验已实现，测试通过。要提交吗？' })
 bdbW.close()
 
@@ -105,6 +106,8 @@ try {
     assert.equal(turns.length, 1)
     assert.equal(turns[0].user, '把支付回调的签名校验做了')
     assert.match(turns[0].lastReply, /要提交吗/)
+    assert.equal(turns[0].errors, 1)
+    assert.match(turns[0].errorTexts[0], /^bash：push 被拒/)
   })
   await t('整理：类型、重要性；约定被钉住', async () => {
     const r = await E.consolidate(db, bdb, peers, { concurrency: 2 })
@@ -225,6 +228,39 @@ try {
     assert.ok(!/一律用中文|18787/.test(txt) && /偏好\/约定类/.test(txt) && /结论类/.test(txt) && /rsync 失败后清磁盘/.test(txt), txt)
     process.env.FOLD_RECALL_DEFER = 'none'
     try { const all = M.recallText(SID, picked); assert.ok(/一律用中文/.test(all) && /18787/.test(all), all) } finally { delete process.env.FOLD_RECALL_DEFER }
+  })
+  await t('事件记录：每轮记 git 改动/提交/还原、报错、待办；压缩盖住最近一轮后注入一次续接快照', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { writeFileSync, mkdirSync, unlinkSync } = await import('node:fs')
+    const J = await import('../lib/journal.mjs')
+    const repo = join(dir, 'repo'); mkdirSync(repo)
+    const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo, stdio: 'ignore' })
+    g('init', '-q'); writeFileSync(join(repo, 'a.txt'), 'one\n'); g('add', '.'); g('commit', '-qm', 'init')
+    assert.equal(J.freshCompaction(db, bdb, SID), null)                      // 第一次只记下时刻
+    // 第 1 轮：改 a.txt，新建 b.txt
+    writeFileSync(join(repo, 'a.txt'), 'one\ntwo\n'); writeFileSync(join(repo, 'b.txt'), 'tmp')
+    const r1 = J.recordTurn(db, bdb, { sessionId: SID, turn: 1, cwd: repo, lastReply: '签名校验已实现。下一步：补回调重放的测试。要提交吗？' })
+    assert.deepEqual(r1.git.dirty, { 'a.txt': '+1 −0', 'b.txt': '新文件' })
+    assert.ok(r1.todos.some((x) => /下一步/.test(x)) && r1.todos.some((x) => /要提交吗/.test(x)))
+    assert.ok(r1.errors[0].includes('<已脱敏>'))
+    // 第 2 轮：提交 a.txt，删掉 b.txt（改过又还原）
+    g('commit', '-qam', '签名校验'); unlinkSync(join(repo, 'b.txt'))
+    const r2 = J.recordTurn(db, bdb, { sessionId: SID, turn: 2, cwd: repo, lastReply: '已提交。' })
+    assert.equal(r2.commits.length, 1); assert.match(r2.commits[0], /签名校验$/)
+    assert.deepEqual(r2.reverted, ['b.txt'])
+    assert.equal(J.freshCompaction(db, bdb, SID), null)                      // 没有新块
+    // billion-context 压缩：一个旧块（像遗忘的索引）不触发；盖住最近一轮的新块触发
+    const w = new DatabaseSync(process.env.BILI_INDEX_DB)
+    const ins = w.prepare('insert into blocks values (?,?,?,?,?,?,?,?,?)')
+    ins.run('b90', SID, 90, 1, 100, 2, 1, Date.now() + 5, JSON.stringify({ topic: '旧工作索引', summary: '' }))
+    assert.equal(J.freshCompaction(db, bdb, SID), null)
+    ins.run('b91', SID, 91, 2960, 3001, 1, 1, Date.now() + 10, JSON.stringify({ topic: '签名校验', summary: '做完了' }))
+    w.close()
+    await new Promise((r) => setTimeout(r, 15))
+    const snap = J.continuation(db, bdb, SID, repo)
+    assert.ok(snap.length <= J.SNAPSHOT_MAX)
+    for (const re of [/续接 · fold-recall/, /b91/, /第 1 轮：把支付回调的签名校验做了/, /工作区干净/, /本会话的提交：\w+ 签名校验/, /改过又还原的文件：b\.txt/, /最近的报错/, /下一步：补回调重放的测试/]) assert.match(snap, re)
+    assert.equal(J.continuation(db, bdb, SID, repo), '')                     // 同一次压缩只注入一次
   })
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')
