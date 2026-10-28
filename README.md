@@ -162,7 +162,8 @@ m00001–m00806 旧工作索引（fold-recall 遗忘，5 段）
 4. **带上最新进展**：`latest` 选中且概率 ≥ 0.4 的那段；否则沿整理得到的"后续"链走到最新一段，跳过噪声。
 5. **怎么放回去**：
    - 本会话里仍在折叠中的块 → 一行：主题 + "要细节先 `decompress bN`"；
-   - 已被合并/遗忘的块、其他会话的块 → 一行：主题、日期 + 摘要开头（≤400 字）。
+   - 已被合并/遗忘的块、其他会话的块 → 一行：主题、日期 + 摘要开头（≤400 字）；
+   - 其中偏好/约定、知识这两类只给一行指引（"以记忆插件召回的最新内容为准"），不带摘要：它们由 dsh-mnemon（Hindsight）跨会话管理、会随新证据更新，再注入一遍旧摘要只会重复，还可能和新结论打架。过程细节 mnemon 不存，照旧带摘要。`FOLD_RECALL_DEFER=none` 关掉分工。
 6. 被找回的块记一次"回忆"，强度大幅提升，短期内不会再被遗忘。
 
 ### 压缩时机
@@ -372,6 +373,7 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 | `FOLD_RECALL_TIMEOUT_MS` | `6000` | 钩子里等决策的上限，超时什么也不注入 |
 | `FOLD_RECALL_FORGET` | `auto` | 遗忘：`auto` 后台直接折成索引 · `hint` 注入提示让模型做 · `off` 只记录 |
 | `FOLD_RECALL_TIMING` | `off` | 压缩时机：`off` 只记录 · `hint` 注入提示 |
+| `FOLD_RECALL_DEFER` | `preference,knowledge` | 回忆时只给指引、不带摘要的类型（交给记忆插件）；`none` 关闭 |
 | `BILI_PROXY` | `http://127.0.0.1:18787` | billion-context 代理地址（后台遗忘、`repair` 经它的插件接口写入） |
 | `FOLD_RECALL_HOME` | `~/.fold-recall` | 状态库与 `.env` 的位置 |
 | `BILI_INDEX_DB` | `~/.local/share/billion-context/sessions/index.db` | billion-context 的库 |
@@ -547,7 +549,7 @@ node bin/fold-recall.mjs label <会话前缀> <轮次> older "它忘了之前定
 1. **你自己的题目集**（测试指南第 4 步）：决定回忆要不要加语义检索。
 2. **更多会话重放**：至少再找两三个长会话跑 `replay`，决定知识类能不能放开遗忘。
 3. **压缩时机改成一行提示**：数据显示提示被模型采纳过；一行（"这是新任务：先 compress 上一件，保留未完成事项"）既有用又不打扰。
-4. **和 dsh-mnemon 分工**：mnemon 已覆盖偏好与项目知识（跨会话），fold-recall 回忆时可以少注入这两类，只补过程细节，避免重复。
+4. ~~**和 dsh-mnemon 分工**~~（已做）：回忆到偏好/约定、知识类只给指引，内容交给 mnemon；见 `FOLD_RECALL_DEFER`。
 5. **自动修复继承**：检测到会话换了 id 而且继承没接全，自动跑 `repair`，不用等出事再手动。
 6. **语义检索（视第 1 步结果）**：只在字面匹配明显不够时再加，尽量不引入依赖（可以复用 billion-context 或 mnemon 已有的检索能力）。
 7. **DSH 插件面板（可选）**：把 `report` 的内容做成 DSH 里的面板，像 hooks 插件的统计弹窗那样。
@@ -596,7 +598,7 @@ node bin/fold-recall.mjs label <会话前缀> <轮次> older "它忘了之前定
 - **Consolidation.** A background pass asks the decision model for each block's type (preference / knowledge / episode / noise), its importance, and which earlier block it continues.
 - **Pinning.** Preferences, and blocks with P(key) ≥ 0.8, are never forgotten. Everything else fades more slowly the more important it is: `retention = strength × (1 + P(key))`.
 - **Forgetting.** In-context blocks whose retention falls below about 1500 messages of disuse are folded in the background, through billion-context's own `compress`, into a topic-only index block (the old blocks nest inside it). Nothing appears in the chat; originals stay in the database.
-- **Recall.** Each user message gets up to 24 candidates: lexical matches, the block after each match, and recent strong memories. The decision model picks what to bring back and where the latest progress is. Folded blocks in the current session get a `decompress` hint; forgotten or cross-session blocks have their summary injected.
+- **Recall.** Each user message gets up to 24 candidates: lexical matches, the block after each match, and recent strong memories. The decision model picks what to bring back and where the latest progress is. Folded blocks in the current session get a `decompress` hint; forgotten or cross-session blocks have their summary injected. Preferences and knowledge only get a one-line pointer: dsh-mnemon (Hindsight) owns those across sessions, so injecting an old summary would duplicate or contradict it (`FOLD_RECALL_DEFER=none` turns this off).
 - **Compaction timing.** Topic switches are judged and logged; billion-context already nudges compaction, so nothing is injected unless `FOLD_RECALL_TIMING=hint`.
 
 **Guarantees**

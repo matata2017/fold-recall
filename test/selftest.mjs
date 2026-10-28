@@ -218,6 +218,14 @@ try {
     const back = await ask()
     assert.ok((back.decision.recalled ?? []).includes(b3.key))              // 撤销后：又能找回
   })
+  await t('分工：别的会话的偏好/结论只给指引，过程照旧带摘要；FOLD_RECALL_DEFER=none 关掉', () => {
+    const mk = (type, block_id, summary) => ({ type, block_id, summary, topic: '主题' + block_id, session_id: OTHER, active: false, created_at: T0 })
+    const picked = [mk('preference', 'b1', '回复一律用中文'), mk('knowledge', 'b2', '端口是 18787'), mk('episode', 'b3', 'rsync 失败后清磁盘')]
+    const txt = M.recallText(SID, picked)
+    assert.ok(!/一律用中文|18787/.test(txt) && /偏好\/约定类/.test(txt) && /结论类/.test(txt) && /rsync 失败后清磁盘/.test(txt), txt)
+    process.env.FOLD_RECALL_DEFER = 'none'
+    try { const all = M.recallText(SID, picked); assert.ok(/一律用中文/.test(all) && /18787/.test(all), all) } finally { delete process.env.FOLD_RECALL_DEFER }
+  })
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')
     assert.equal(D.redact('key sk-abcdefghijklmnopqrstuvwxyz ok'), 'key <已脱敏> ok')
