@@ -277,6 +277,12 @@ try {
     assert.ok(snap.length <= J.SNAPSHOT_MAX)
     for (const re of [/续接 · fold-recall/, /b91/, /第 1 轮：把支付回调的签名校验做了/, /工作区干净/, /本会话的提交：\w+ 签名校验/, /改过又还原的文件：b\.txt/, /最近的报错/, /下一步：补回调重放的测试/]) assert.match(snap, re)
     assert.equal(J.continuation(db, bdb, SID, repo), '')                     // 同一次压缩只注入一次
+    // 没有事件记录（长轮次、被打断的轮次）：从对话记录补请求、报错、待办
+    const bare = J.snapshotText(db, 'session-none', repo, [], bdb)
+    assert.equal(bare, '')                                                   // 对话记录里也没有这个会话
+    db.prepare('delete from journal where session_id=?').run(SID)
+    const live = J.snapshotText(db, SID, repo, [], bdb)
+    assert.match(live, /- 把支付回调的签名校验做了/); assert.match(live, /最近的报错/); assert.match(live, /要提交吗/)
   })
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')

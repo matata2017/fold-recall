@@ -332,11 +332,11 @@ function cmdSnapshot() {
   if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
   const sid = resolveSession(bdb, pos[1] ?? '')
   const j = S.journalFor(db, sid, 30)
-  if (!j.length) return console.log(`${sid} 还没有事件记录（每轮结束时由 agent/turn-stopping 钩子记录）`)
+  if (!j.length) console.log(`${sid} 还没有事件记录（每轮结束时由 agent/turn-stopping 钩子记录）；下面只用对话记录和当前 git 状态拼`)
   if (args.includes('--log')) for (const r of j) console.log(`第 ${r.turn} 轮 ${new Date(r.ts).toISOString().slice(5, 16)} 消息≤${r.end_ref}  ${D.oneLine(r.user).slice(0, 60)}` +
     `${r.commits?.length ? `\n  提交：${r.commits.join('；')}` : ''}${r.reverted?.length ? `\n  还原：${r.reverted.join('、')}` : ''}` +
     `${r.errors?.length ? `\n  报错：${r.errors.length} 条` : ''}${r.todos?.length ? `\n  待办：${r.todos.join(' / ')}` : ''}`)
-  console.log((args.includes('--log') ? '\n' : '') + J.snapshotText(db, sid, null))
+  console.log((args.includes('--log') ? '\n' : '') + J.snapshotText(db, sid, null, [], bdb))
 }
 
 // 原文索引：补全某会话所在项目（不给会话则全部会话）的原文三字索引
