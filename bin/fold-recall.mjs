@@ -10,6 +10,7 @@
  *   fold-recall label <session> <turn> <none|tail|older|unknown> [备注]
  *   fold-recall supersede <session> <bN> [原因] / unsupersede <session> <bN> / superseded   作废被推翻的记忆块
  *   fold-recall snapshot <session> [--log]    续接快照：压缩后会注入什么；--log 列出逐轮事件记录
+ *   fold-recall index [<session>]           原文三字索引：补全（钩子每次只补一点，后台整理时补全）
  *   fold-recall doctor                       检查环境
  */
 import '../lib/quiet.mjs'
@@ -26,6 +27,7 @@ import * as E from '../lib/engine.mjs'
 import * as R from '../lib/repair.mjs'
 import * as RP from '../lib/replay.mjs'
 import * as J from '../lib/journal.mjs'
+import * as RI from '../lib/rawindex.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
 const LOCK = join(S.HOME, 'consolidate.lock')
@@ -337,6 +339,18 @@ function cmdSnapshot() {
   console.log((args.includes('--log') ? '\n' : '') + J.snapshotText(db, sid, null))
 }
 
+// 原文索引：补全某会话所在项目（不给会话则全部会话）的原文三字索引
+function cmdIndex() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb) return console.error('找不到 billion-context 的库：' + B.BILI_DB)
+  const sids = pos[1] ? B.biliSessions(bdb, peersOf(db, resolveSession(bdb, pos[1]))).map((s) => s.session_id)
+    : bdb.prepare('select session_id from sessions').all().map((r) => r.session_id)
+  const t0 = Date.now()
+  const n = RI.indexSessions(db, bdb, sids)
+  const total = db.prepare('select count(*) n from raw_map').get().n
+  console.log(`新索引 ${n} 条（${sids.length} 个会话，${((Date.now() - t0) / 1000).toFixed(1)} 秒）；累计 ${total} 条；状态库 ${(statSync(join(S.HOME, 'state.db')).size / 1e6).toFixed(1)} MB`)
+}
+
 async function cmdDoctor() {
   const [maj, min] = process.versions.node.split('.').map(Number)
   console.log(`node ${process.versions.node} ${maj > 22 || (maj === 22 && min >= 5) ? 'OK' : '需要 ≥ 22.5（node:sqlite）'}`)
@@ -350,12 +364,12 @@ async function cmdDoctor() {
 }
 
 const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor,
-  supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded, snapshot: cmdSnapshot }
+  supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded, snapshot: cmdSnapshot, index: cmdIndex }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }
 // 钩子里任何异常都不能打断宿主
 Promise.resolve(run()).catch((e) => { if (args[0] !== 'hook' || process.env.FOLD_RECALL_DEBUG) { console.error(e); process.exitCode = 1 } })
 
 function readFileHead() {
-  return `fold-recall <hook|consolidate|recall|report|snapshot|repair|label|supersede|unsupersede|superseded|doctor>  （详见 README）`
+  return `fold-recall <hook|consolidate|recall|report|snapshot|index|repair|label|supersede|unsupersede|superseded|doctor>  （详见 README）`
 }

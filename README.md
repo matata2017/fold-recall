@@ -153,10 +153,12 @@ m00001–m00806 旧工作索引（fold-recall 遗忘，5 段）
 
 ### 回忆：被问起时再想起
 
-1. **选候选**（最多 24 个），三个来源：
+1. **选候选**（最多 24 个），四个来源：
    - **字面相关的**：中文按相邻二字组、英文/标识符按词，逆文档频率加权。英文/标识符权重加倍（多是名字），命中主题的权重加倍，只出现一两次的二字组封顶。排序 = 相关度 × (0.5 + 0.5 × 归一化强度)，钉住的再 ×1.2。
    - **相关块的下一段**：问"最后怎么样了"时，答案常在后一段。
    - **最近最牢的几块**：人回忆时，最近的事先浮上来，即使字面上对不上。
+   - **原文命中的块**：摘要是模型写的，会丢细节（变量名、文件名、报错原文、某句原话）。fold-recall 给原始消息建了 SQLite FTS5 三字索引（trigram），新消息里的英文/标识符和 ≥3 个字的中文片段去查原文；到处都有的词（超过 1% 的消息里都有，如"为什么""怎么做"）当停用词丢掉。命中的消息映射回盖住它的那个块（嵌套压缩时取最具体的一层），块的得分 = 命中的不同词的逆文档频率之和 ÷ 全部词的（和上面同一个思路，常见词命中一百条也压不过一个少见的名字），≥ 0.3 的最多补 4 个，并把命中那句原文附在选项后面给决策模型看。
+     三字索引查不了两个字的中文词（"部署"），所以它只**补充**、不替换上面的二字组相关度。只索引真用户消息、助手回复和工具调用（命令、路径），不索引工具输出与思考过程；索引不再存一份原文（`content=''`），片段按需从 billion-context 的库里取。
    - 新消息里记忆库认得的词少于 2 个（如"继续""好的"），不做回忆。
 2. **决策模型选**：`recall`（最需要找回哪段）和 `latest`（这件事最新的进展在哪段），共用同一组候选。
 3. **接受条件**：选中段的概率 ≥ 0.5，**或**"都不需要"的概率 ≤ 0.05。第二个条件对应的情况是：确实需要旧记忆，只是相似的段太多，概率被摊薄了。
@@ -183,6 +185,7 @@ m00001–m00806 旧工作索引（fold-recall 遗忘，5 段）
 - 整理在**分离的后台进程**里做，每次最多 40 块、并发 4，有锁防重复，不挡对话。
 - DSH 的 `agent/pre-step` 每一步都会触发，同一轮只处理一次。
 - 子会话（subagent / teammate）默认跳过：子智能体常被要求独立判断，注入同项目旧记忆会造成锚定。
+- 原文索引：钩子里每次最多补 400 条新消息（几十毫秒），其余由后台整理补全，或手动 `index`。实测 24k 条消息建索引 3.7 秒、状态库约 40 MB，一次查询 3–12 毫秒。
 - 钩子里任何异常都吞掉，不打断宿主。
 
 ---
@@ -317,6 +320,9 @@ node bin/fold-recall.mjs recall <会话> "市场 PR 最后合进去没"
 # 续接快照：现在压缩的话会注入什么；--log 列出逐轮事件记录
 node bin/fold-recall.mjs snapshot <会话> [--log]
 
+# 原文三字索引：补全某会话所在项目的（不给会话则全部）；钩子平时一点点补，第一次装好可以先跑一遍
+node bin/fold-recall.mjs index [<会话>]
+
 # 手动整理
 node bin/fold-recall.mjs consolidate <会话> [--limit N]
 
@@ -405,6 +411,7 @@ node bin/fold-recall.mjs repair session-f88b5df8 --apply    # 执行
 | `FOLD_RECALL_TIMEOUT_MS` | `6000` | 钩子里等决策的上限，超时什么也不注入 |
 | `FOLD_RECALL_FORGET` | `auto` | 遗忘：`auto` 后台直接折成索引 · `hint` 注入提示让模型做 · `off` 只记录 |
 | `FOLD_RECALL_TIMING` | `off` | 压缩时机：`off` 只记录 · `hint` 注入提示 |
+| `FOLD_RECALL_RAW` | `on` | `off` 关闭原文检索（只用摘要的字面相关） |
 | `FOLD_RECALL_JOURNAL` | `on` | `off` 关闭事件记录与续接快照 |
 | `FOLD_RECALL_DEFER` | `preference,knowledge` | 回忆时只给指引、不带摘要的类型（交给记忆插件）；`none` 关闭 |
 | `BILI_PROXY` | `http://127.0.0.1:18787` | billion-context 代理地址（后台遗忘、`repair` 经它的插件接口写入） |
@@ -592,7 +599,7 @@ node bin/fold-recall.mjs label <会话前缀> <轮次> older "它忘了之前定
 
 ## 局限与常见问题
 
-**相关度是字面的。** 换个说法可能找不到候选。"最近最牢"的候选能补一部分。没有用向量库，是为了零依赖、零部署。
+**相关度是字面的。** 换个说法可能找不到候选。"最近最牢"的候选能补一部分；原文索引能找回摘要里丢掉的细节，但同样是字面的。没有用向量库，是为了零依赖、零部署。
 
 **遗忘和压缩只是提示。** 模型可以不照做。是否执行可以在 billion-context 的块记录里看到。
 
@@ -633,6 +640,7 @@ node bin/fold-recall.mjs label <会话前缀> <轮次> older "它忘了之前定
 - **Forgetting.** In-context blocks whose retention falls below about 1500 messages of disuse are folded in the background, through billion-context's own `compress`, into a topic-only index block (the old blocks nest inside it). Nothing appears in the chat; originals stay in the database.
 - **Recall.** Each user message gets up to 24 candidates: lexical matches, the block after each match, and recent strong memories. The decision model picks what to bring back and where the latest progress is. Folded blocks in the current session get a `decompress` hint; forgotten or cross-session blocks have their summary injected. Preferences and knowledge only get a one-line pointer: dsh-mnemon (Hindsight) owns those across sessions, so injecting an old summary would duplicate or contradict it (`FOLD_RECALL_DEFER=none` turns this off).
 - **Continuation snapshot.** At the end of every turn a journal entry records the request, tool errors, git state (dirty files, new commits, files changed then reverted) and the next steps / open questions from the reply. When billion-context folds the latest turn into a summary, a ≤1500-char snapshot of those facts is injected once, so the model can pick up where it was. No model calls.
+- **Raw-text retrieval.** Summaries drop details (identifiers, file names, error strings). An SQLite FTS5 trigram index over the original user messages, replies and tool calls adds up to 4 more candidates: hits map back to the block that covers them, scored by IDF-weighted term coverage, with the matching sentence shown to the decision model. It supplements the bigram match (trigrams cannot match two-character Chinese words). `FOLD_RECALL_RAW=off` disables it.
 - **Compaction timing.** Topic switches are judged and logged; billion-context already nudges compaction, so nothing is injected unless `FOLD_RECALL_TIMING=hint`.
 
 **Guarantees**

@@ -229,6 +229,22 @@ try {
     process.env.FOLD_RECALL_DEFER = 'none'
     try { const all = M.recallText(SID, picked); assert.ok(/一律用中文/.test(all) && /18787/.test(all), all) } finally { delete process.env.FOLD_RECALL_DEFER }
   })
+  await t('原文检索：摘要里没写的细节按原文命中补进候选，带原文片段；增量索引；两个字的词不走三字索引', async () => {
+    const R = await import('../lib/rawindex.mjs')
+    R.indexSessions(db, bdb, [SID, OTHER])                                   // 回忆时已经顺手补过一部分
+    assert.equal(db.prepare('select count(*) n from raw_map').get().n, 3)    // 真用户消息、工具调用、助手回复；宿主注入的跳过
+    assert.equal(R.indexSessions(db, bdb, [SID, OTHER]), 0)                  // 增量：没有新消息
+    assert.deepEqual(R.queryTerms('部署'), [])
+    const prompt = '那次回调签名校验是怎么做的'
+    const hits = R.rawHits(db, [SID, OTHER], prompt)
+    assert.ok(hits.length >= 1 && hits.every((h) => h.session_id === SID))
+    const mem = E.loadAll(db, bdb, peers)
+    M.score(mem, prompt)
+    mem.rawHits = hits
+    const b1 = M.candidates(mem, 24, { current: SID }).find((b) => b.key === SID + '#b1')   // 主题"早期排查日志格式"，字面对不上
+    assert.ok(b1 && b1.rawRef != null)
+    assert.match(R.snippet(bdb, SID, b1.rawRef, hits.terms), /签名校验/)
+  })
   await t('事件记录：每轮记 git 改动/提交/还原、报错、待办；压缩盖住最近一轮后注入一次续接快照', async () => {
     const { execFileSync } = await import('node:child_process')
     const { writeFileSync, mkdirSync, unlinkSync } = await import('node:fs')
