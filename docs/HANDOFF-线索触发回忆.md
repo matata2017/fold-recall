@@ -33,7 +33,7 @@
 
 ### 1.2 dsh-hoos 串行执行，耗时相加
 
-`dsh-hoos/lib/index.js:363` 的 `runEvent` 用 `for` 循环逐个 `await executeHook`，同一事件的钩子一个跑完才跑下一个。pinrong-online 项目每轮第一步要依次跑：
+`dsh-hoos/lib/index.js:363` 的 `runEvent` 用 `for` 循环逐个 `await executeHook`，同一事件的钩子一个跑完才跑下一个。一个真实项目每轮第一步要依次跑：
 - fold-recall
 - doc-drift（需求变更识别）
 - Trellis（项目钩子，实测约 70 ms）
