@@ -86,6 +86,32 @@ function spawnConsolidate(sessionId) {
   } catch {}
 }
 
+function spawnDecide(sessionId, turn) {
+  try {
+    spawn(process.execPath, [SELF, 'decide', sessionId, String(turn)],
+      { detached: true, stdio: 'ignore', windowsHide: true, env: process.env }).unref()
+  } catch {}
+}
+
+function spawnForget(sessionId, turn) {
+  try {
+    spawn(process.execPath, [SELF, 'forget', sessionId, String(turn)],
+      { detached: true, stdio: 'ignore', windowsHide: true, env: process.env }).unref()
+  } catch {}
+}
+
+async function cmdDecide() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb || !pos[1] || !pos[2]) return
+  await E.decidePending(db, bdb, { sessionId: pos[1], turn: pos[2], peers: peersOf(db, pos[1]) })
+}
+
+async function cmdForget() {
+  const db = S.openStore(), bdb = B.openBili()
+  if (!bdb || !pos[1] || !pos[2]) return
+  await E.forgetInBackground(db, bdb, { sessionId: pos[1], turn: pos[2], peers: peersOf(db, pos[1]) })
+}
+
 async function readStdin() {
   if (process.stdin.isTTY) return ''
   let data = ''
@@ -120,13 +146,15 @@ async function hook() {
   // 每轮结束：记一条事件（请求、报错、git 改动/提交/撤回、待办），不输出
   if (ev === 'agent/turn-stopping') return void J.recordTurn(db, bdb, { sessionId, turn, cwd: p.cwd, lastReply: p.last_assistant_message })
   // 每一步：刚被压缩过就先注入续接快照（压缩可能发生在一轮中间）
-  const parts = [J.continuation(db, bdb, sessionId, p.cwd)]
+  const parts = [J.continuation(db, bdb, sessionId, p.cwd), E.deliverPending(db, bdb, { sessionId, turn, prompt, peers: peersOf(db, sessionId) })]
   // 每轮第一步：回忆 / 遗忘 / 压缩时机（同一轮只处理一次）
   if (prompt && S.firstSeen(db, sessionId, turn)) {
     const { context, decision } = await E.onPrompt(db, bdb, {
       sessionId, turn, prompt, peers: peersOf(db, sessionId),
       timeoutMs: Number(process.env.FOLD_RECALL_TIMEOUT_MS || 6000),
     })
+    if (decision.pending) spawnDecide(sessionId, turn)
+    if (decision.forget?.queued) spawnForget(sessionId, turn)
     if (decision.unjudged > 0 && D.apiKey()) spawnConsolidate(sessionId)
     parts.push(context)
   }
@@ -363,7 +391,7 @@ async function cmdDoctor() {
   }
 }
 
-const cmds = { hook, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor,
+const cmds = { hook, decide: cmdDecide, forget: cmdForget, consolidate: cmdConsolidate, recall: cmdRecall, eval: cmdEval, replay: cmdReplay, report: cmdReport, repair: cmdRepair, label: cmdLabel, doctor: cmdDoctor,
   supersede: cmdSupersede, unsupersede: cmdUnsupersede, superseded: cmdSuperseded, snapshot: cmdSnapshot, index: cmdIndex }
 const run = cmds[args[0]]
 if (!run) { console.log(readFileHead()); process.exit(args[0] ? 1 : 0) }

@@ -54,16 +54,18 @@ bdbW.close()
 
 // ---------------------------------------------------------------- 假决策接口：按题目选第一个"像样"的答案
 let calls = 0
+let slow = 0                                             // >0：每条决策请求先睡这么久（验"首步不等网络"）
 const compressed = []                                    // 假的 billion-context 插件接口收到的 compress
 const server = createServer((req, res) => {
   let body = ''
-  req.on('data', (d) => (body += d)).on('end', () => {
+  req.on('data', (d) => (body += d)).on('end', async () => {
     res.setHeader('Content-Type', 'application/json')
     if (req.url === '/__bili/plugin/tool') {
       const j = JSON.parse(body)
       compressed.push(j)
       return res.end(JSON.stringify({ ok: true, tool: j.tool, outcome: 'applied', blocksCreated: 1, result: '[Compressed]' }))
     }
+    if (slow > 0) await new Promise((r) => setTimeout(r, slow))
     calls++
     const { questions, state } = JSON.parse(body)
     const answers = {}
@@ -140,14 +142,27 @@ try {
     assert.equal(compressed.length, 0)
   })
   await t('遗忘在后台执行：经 billion-context 的 compress 折成只列主题的索引；对话里只有回忆的一两行', async () => {
-    // 换个不相关的话题：旧块 b1–b4 都淡了，后台折成一个索引块；时机判断只记录、不注入
+    // 换个不相关的话题：旧块 b1–b4 都淡了，后台折成一个索引块；时机判断移到后台，首步不问模型
     const r9 = await E.onPrompt(db, bdb, { sessionId: SID, turn: 9, prompt: '写个爬虫抓一下天气预报', peers })
     assert.equal(r9.context, '')
+    assert.equal(r9.decision.forget.queued, true)                        // 首步只排队，不折块
+    assert.equal(compressed.length, 0)                                    // 首步没调 compress
+    await E.forgetInBackground(db, bdb, { sessionId: SID, turn: 9, peers })
     assert.equal(compressed.length, 1)
     assert.equal(compressed[0].conversationId, SID)
     assert.match(compressed[0].args.content, /^m00001–m00800 旧工作索引（fold-recall 遗忘，4 段）\n- b1「早期排查日志格式」/)
-    assert.equal(r9.decision.forget.outcome, 'applied')
-    assert.equal(r9.decision.timing?.tier, 'switch')                  // 换话题：判断照记，但不注入
+    const bgF = db.prepare('select json from decisions where session_id=? and turn=? order by ts').all(SID, String(9))
+      .map((r) => JSON.parse(r.json)).find((d) => d.phase === 'background' && d.forget)
+    assert.ok(bgF, '后台应记一条折块结果')
+    assert.equal(bgF.forget.outcome, 'applied')
+    assert.equal(r9.decision.timing, undefined)                        // 换话题：首步不再同步问时机
+    assert.equal(r9.decision.pending, true)                            // 改由后台 worker 问
+    await E.decidePending(db, bdb, { sessionId: SID, turn: 9, peers })
+    const bg = db.prepare('select json from decisions where session_id=? and turn=? order by ts').all(SID, String(9))
+      .map((r) => JSON.parse(r.json)).find((d) => d.timing)
+    assert.ok(bg, '后台应记一条 phase=background 的判断')
+    assert.equal(bg.timing?.tier, 'switch')                            // 换话题：判断照记，但不注入
+    assert.equal(bg.recall, undefined)                                 // C 路按规格"什么也不做"：后台只问时机，不问回忆题
     // 问起来时照样找回（这里的假 billion-context 不真的折叠，b3 仍在眼前，所以提示 decompress）
     const { context, decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 10, prompt: 'deploy.sh 部署脚本最后修好没', peers })
     assert.match(context, /\[回忆 · fold-recall\][\s\S]*deploy\.sh 最终结果/)
@@ -160,12 +175,81 @@ try {
     assert.equal(b3.recalls, 1)
     assert.ok(b3.w > mem.blocks.find((b) => b.key === `${SID}#b1`).w * 10)   // 刚被找回的远比没用过的牢
   })
+  await t('路线 A：文件名这类标识符算"独特线索"，同一件事的上一段不算对手', async () => {
+    // deploy.sh 是文件名（标识符），模块自己的 idf 给它加倍，它是全语料最稀有的词——所以摘要里没逐字出现也能算独特线索
+    const mem = E.loadAll(db, bdb, peers)
+    const q = 'deploy.sh 部署脚本最后修好没'
+    M.score(mem, q)
+    const cands = M.candidates(mem, 24, { current: SID })
+    const r = M.route(mem, q, cands)
+    assert.equal(r.route, 'A')
+    assert.equal(r.block.key, `${SID}#b3`)
+    // b2 是 b3 的上一段（同一件事的连续几段），不当"第二名"，所以 2 倍领先仍然成立
+    const scores = cands.map((b) => ({ id: b.block_id, s: Math.max(b.rel ?? 0, b.rawRel ?? 0) })).sort((a, b) => b.s - a.s)
+    assert.equal(scores[0].id, 'b3')
+    assert.equal(scores[1].id, 'b2')
+    assert.ok(r.block.rel < scores[1].s * 2, '按裸分数 b3 并没领先 b2 两倍，是"相邻段不算对手"让 A 成立的')
+    // 明说"上次"就是刻意翻旧账：线索一样独特也交后台判断，不本地直中
+    assert.equal(M.route(mem, 'deploy.sh 上次改完最后结果如何', cands).route, 'B')
+    assert.equal(M.route(mem, '写个爬虫抓一下天气预报', cands).route, 'C')   // 没有独特线索：不触发
+    // 中文片段也算独特线索：语料一大，"idf 前 10%" 几乎只剩标识符，中文片段靠"块级 df 很低"这条补进来
+    const q2 = '支付回调签名校验是怎么做的'
+    M.score(mem, q2)
+    const r2 = M.route(mem, q2, M.candidates(mem, 24, { current: SID }))
+    assert.equal(r2.route, 'A')
+    assert.equal(r2.block.key, `${SID}#b5`)
+  })
+  await t('独特线索：语料一大就按"词有多罕见"判，而不是只认标识符', async () => {
+    // 60 个块：每个都带一个独一无二的标识符（mod-NN.yaml），共享中文词；另有一个块含只出现一次的中文片段。
+    // 这种语料里"idf 前 10%"全被标识符占满（标识符 idf 加倍），所以只靠 idf 的话中文片段永远挤不进去——
+    // 块级 df 很低的判据就是给这种情况兜底。
+    const blocks = []
+    for (let i = 0; i < 60; i++) blocks.push({ topic: `mod-${String(i).padStart(2, '0')}.yaml 配置片段`, summary: `第 ${i} 份配置片段的说明` })
+    blocks.push({ topic: '独有中文片段的排查记录', summary: '独有中文片段出现了一次' })
+    for (let i = 0; i < 5; i++) blocks[i].summary += ' 中等词组'
+    const mk = (b, rel) => ({ ...b, key: b.topic, rel, rawRel: 0, rawDistinct: false, session_id: 's', start_ref: 1, end_ref: 2 })
+    const mem = { blocks }
+    const special = blocks[60], ident = blocks[6]
+    assert.equal(M.route(mem, '独有中文片段 怎么排查的', [mk(special, 0.9)]).route, 'A')   // 只出现一次的中文片段 → 独特线索
+    assert.equal(M.route(mem, 'mod-06.yaml 的说明', [mk(ident, 0.9)]).route, 'A')      // 独一无二的标识符 → 独特线索
+    const common = blocks[0]
+    assert.equal(M.route(mem, '配置片段的说明', [mk(common, 0.9)]).route, 'C')          // 到处都是的词 → 不是线索
+    assert.equal(M.route(mem, '中等词组是什么', [mk(common, 0.9)]).route, 'C')          // 出现 5 次的词 → 也不算独特线索
+    // "比第二名强一倍才算直中"：分数接近的两个候选只算模糊强匹配，交给后台判断
+    const rival = { ...mk(blocks[1], 0.6), key: 'rival', start_ref: 100, end_ref: 200 }
+    assert.equal(M.route(mem, '独有中文片段 怎么排查的', [mk(special, 0.9), rival]).route, 'B')
+    const weak = { ...mk(blocks[1], 0.4), key: 'weak', start_ref: 100, end_ref: 200 }
+    assert.equal(M.route(mem, '独有中文片段 怎么排查的', [mk(special, 0.9), weak]).route, 'A')
+  })
+  await t('后台交付：首步不等模型、下一步才注入、只交付一次、过期不交付', async () => {
+    slow = 3000                                      // 3 秒代替交接文档的 15 秒：验的是"首步不等网络"，不是具体秒数
+    try {
+      const before = calls, t0 = Date.now()
+      const r = await E.onPrompt(db, bdb, { sessionId: SID, turn: 12, prompt: 'deploy.sh 上次改完最后结果如何', peers })
+      assert.equal(r.decision.route, 'B')            // "上次…最后结果"命中旧事件意图
+      assert.equal(r.decision.pending, true)
+      assert.equal(r.context, '')                    // 首步不注入
+      assert.equal(calls, before)                    // 首步没有发决策请求
+      assert.ok(Date.now() - t0 < 1500, `首步不应等待决策接口，实际 ${Date.now() - t0}ms`)
+      assert.equal(E.deliverPending(db, bdb, { sessionId: SID, turn: 12, prompt: 'deploy.sh 上次改完最后结果如何', peers }), '')
+      await E.decidePending(db, bdb, { sessionId: SID, turn: 12, peers })
+      assert.equal(db.prepare('select status from pending where session_id=? and turn=?').get(SID, '12').status, 'done')
+      const ask = () => E.deliverPending(db, bdb, { sessionId: SID, turn: 13, prompt: 'deploy.sh 上次改完最后结果如何', peers })
+      assert.match(ask(), /\[回忆 · fold-recall\][\s\S]*deploy\.sh 最终结果/)   // 下一步才注入
+      assert.equal(ask(), '')                        // 同一轮只交付一次
+      db.prepare('insert or replace into pending values (?,?,?,?,?,?,?)')
+        .run(SID, '13', Date.now() - 20 * 60 * 1000, 'deploy.sh 上次改完最后结果如何', JSON.stringify([`${SID}#b3`]), 'done', JSON.stringify({ keys: [`${SID}#b3`] }))
+      assert.equal(E.deliverPending(db, bdb, { sessionId: SID, turn: 15, prompt: 'deploy.sh 上次改完最后结果如何', peers }), '')
+      assert.equal(db.prepare('select status from pending where session_id=? and turn=?').get(SID, '13').status, 'expired')
+    } finally { slow = 0 }
+  })
   await t('被找回过的块不再遗忘；遗忘有冷却；时机只记录', async () => {
     const mem = E.loadAll(db, bdb, peers)
     assert.ok(!M.forgetRuns(mem, SID).flat().some((b) => b.block_id === 'b3'))
     const { decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 11, prompt: '写个爬虫抓天气预报', peers })
     assert.equal(decision.forget, undefined)                          // 上一轮刚遗忘过，冷却中
     assert.equal(decision.timing_asked, false)                        // 时机判断也有冷却（上次在第 9 轮）
+    assert.equal(decision.pending, undefined)                         // 冷却中：不挂后台
     assert.equal(compressed.length, 1)
   })
   await t('"继续"这类消息不触发回忆、不调用回忆题', async () => {
@@ -287,6 +371,21 @@ try {
   await t('脱敏：密钥样式的串不会发出去', async () => {
     const D = await import('../lib/decide.mjs')
     assert.equal(D.redact('key sk-abcdefghijklmnopqrstuvwxyz ok'), 'key <已脱敏> ok')
+  })
+  await t('路线 C：什么也不做——后台只判压缩时机，不问回忆题，也不会想起任何东西', async () => {
+    // 这一轮字面上有候选（"磁盘/清理/重试"都在 b2 的摘要里），但没有独特线索 → 走 C 路。
+    const { context, decision } = await E.onPrompt(db, bdb, { sessionId: SID, turn: 40, prompt: '磁盘 清理 重试', peers })
+    assert.equal(decision.route, 'C')
+    assert.equal(context, '')                                   // C 路首步不注入
+    assert.equal(decision.pending, true)                       // 只有压缩时机挪到了后台
+    const row = db.prepare('select cand_keys from pending where session_id=? and turn=?').get(SID, '40')
+    assert.equal(row.cand_keys, '[]')                          // C 路不带候选：后台无从挑回忆目标
+    await E.decidePending(db, bdb, { sessionId: SID, turn: 40, peers })
+    const bg = db.prepare('select json from decisions where session_id=? and turn=? order by ts').all(SID, '40')
+      .map((r) => JSON.parse(r.json)).find((d) => d.phase === 'background')
+    assert.ok(bg, '后台应记一条 phase=background 的判断')
+    assert.equal(bg.recall, undefined)                         // 后台没问回忆题
+    assert.equal(E.deliverPending(db, bdb, { sessionId: SID, turn: 41, prompt: '磁盘 清理 重试', peers }), '')  // 也没有东西可交付
   })
   console.log(`\n${ok} 项全部通过（假接口被调用 ${calls} 次）`)
 } finally {
